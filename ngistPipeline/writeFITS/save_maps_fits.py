@@ -295,7 +295,7 @@ def savefitsmaps_GASmodule(module_id="GAS", outdir="", LEVEL="", AoNThreshold=4)
     hdu1.close()
 
 
-def savefitsmaps_LSmodule(module_id="LS", outdir="", RESOLUTION=""):
+def savefitsmaps_LSmodule(outdir="", RESOLUTION=""):
     """
     savefitsmaps_LSmodule _summary_
 
@@ -308,7 +308,6 @@ def savefitsmaps_LSmodule(module_id="LS", outdir="", RESOLUTION=""):
     RESOLUTION : str, optional
         _description_, by default ""
     """
-    runname = outdir
     rootname = outdir.rstrip("/").split("/")[-1]
 
     # Read bintable
@@ -322,7 +321,7 @@ def savefitsmaps_LSmodule(module_id="LS", outdir="", RESOLUTION=""):
     pixelsize = table_hdu[0].header["PIXSIZE"]
     oldwcshdr = table_hdu[2].header.copy()
 
-    # update WCS
+    # Update WCS
     wcs = WCS(oldwcshdr).celestial
     newwcshdr = strip_wcs_from_header(oldwcshdr)
     newwcshdr.update(diagonal_wcs_to_cdelt(wcs).to_header())
@@ -337,17 +336,16 @@ def savefitsmaps_LSmodule(module_id="LS", outdir="", RESOLUTION=""):
             "All Y-coordinates are 0.0 or np.nan. Plotting maps will not work without reasonable spatial information!\n"
         )
 
-    # Read results
     if RESOLUTION == "ORIGINAL":
         hdu = fits.open(os.path.join(outdir, rootname) + "_ls_orig_res.fits")
     elif RESOLUTION == "ADAPTED":
         hdu = fits.open(os.path.join(outdir, rootname) + "_ls_adap_res.fits")
 
-    names = list(hdu[1].data.dtype.names)
+    names = list(hdu["LS_DATA"].data.dtype.names)
 
     result = np.zeros((len(ubins), len(names)))
     for i, name in enumerate(names):
-        result[:, i] = np.array(hdu[1].data[name])
+        result[:, i] = np.array(hdu["LS_DATA"].data[name])
 
     # Convert results to long version
     result_long = np.zeros((len(binNum_long), result.shape[1]))
@@ -357,17 +355,12 @@ def savefitsmaps_LSmodule(module_id="LS", outdir="", RESOLUTION=""):
         result_long[idx, :] = result[i, :]
     result = result_long
 
-    # result[:, 0] = result[:, 0] - np.nanmedian(result[:, 0]) [median subtraction on products]
-
-    ####### Adding the ability to output maps as fits files
     primary_hdu = fits.PrimaryHDU()
     hdu1 = fits.HDUList([primary_hdu])
 
     for iterate in range(0, len(names)):
-        # Prepare main plot
         val = result[:, iterate]
 
-        # Create image in pixels
         xmin = np.min(X)
         xmax = np.max(X)
         ymin = np.min(Y)
@@ -378,27 +371,22 @@ def savefitsmaps_LSmodule(module_id="LS", outdir="", RESOLUTION=""):
         j = np.array(np.round((Y - ymin) / pixelsize), dtype=np.int32)
         image = np.full((npixels_x, npixels_y), np.nan)
 
-        # Reverse the i index to each row of the image
-        # because ra increases West-East (right-left in image plane)
+        # Reverse i index: RA increases West-East (right-left in image plane)
         image[i[::-1][idx_inside], j[idx_inside]] = val[idx_inside]
 
-        # Transpose x and y to reorient the image correctly
-        # im[ra, dec] = arr[col, row]
+        # Transpose: numpy uses arr[row, col], FITS uses im[ra, dec] = arr[col, row]
         image = image.T
 
-        # make HDU
         image_hdu = fits.ImageHDU(image, header=newwcshdr, name=names[iterate])
-        # Append fits image
         hdu1.append(image_hdu)
-    hdu1.writeto(
+
+    outfile = (
         os.path.join(outdir, rootname)
-        + "_"
-        + module_id.lower()
-        + "_"
+        + "_ls_"
         + RESOLUTION.lower()
-        + "_maps.fits",
-        overwrite=True,
+        + "_maps.fits"
     )
+    hdu1.writeto(outfile, overwrite=True)
     hdu1.close()
 
 

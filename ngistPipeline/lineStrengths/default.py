@@ -13,10 +13,7 @@ from ppxf.ppxf_util import gaussian_filter1d
 from printStatus import printStatus
 from tqdm import tqdm
 
-
-
 cvel = 299792.458
-
 
 """
 PURPOSE:
@@ -29,6 +26,64 @@ PURPOSE:
   (ui.adsabs.harvard.edu/#abs/2018MNRAS.475.3700M).
 """
 
+def calculate_minimisation_diagnostics(ls_indices, names, model_indices, params, config, index_names):
+    target_indices = ['Hbeta_o', 'Fe5270', 'Mgb']
+
+    obs_indices_positions = []
+    found_indices = []
+    for target in target_indices:
+        idx_pos = np.where(names == target)[0]
+        if len(idx_pos) > 0:
+            obs_indices_positions.append(idx_pos[0])
+            found_indices.append(target)
+
+    if len(found_indices) != 3:
+        logging.warning(f"Not all minimisation indices found. Found: {found_indices}")
+        printStatus.warning(f"Expected Hbeta_o, Fe5270, Mgb — found: {found_indices}")
+        nbins = ls_indices.shape[0]
+        return np.full((nbins, 3), np.nan), np.full(nbins, np.nan), np.full(nbins, -1, dtype=int)
+
+    obs_indices_positions = np.array(obs_indices_positions)
+
+    model_column_order = []
+    for target in target_indices:
+        if target not in index_names:
+            logging.warning(f"{target} not in index_names — cannot map to model column")
+            nbins = ls_indices.shape[0]
+            return np.full((nbins, 3), np.nan), np.full(nbins, np.nan), np.full(nbins, -1, dtype=int)
+        model_column_order.append(index_names.index(target))
+
+    model_indices_3 = model_indices[:, model_column_order]
+
+    nbins = ls_indices.shape[0]
+    nmodels = model_indices_3.shape[0]
+    min_params   = np.zeros((nbins, 3))
+    min_residuals = np.zeros(nbins)
+    min_indices  = np.zeros(nbins, dtype=int)
+
+    printStatus.running("Computing minimisation diagnostics (Hbeta_o, Fe5270, Mgb)")
+
+    for i in range(nbins):
+        obs = ls_indices[i, obs_indices_positions]
+        if np.any(np.isnan(obs)):
+            min_params[i, :] = np.nan
+            min_residuals[i] = np.nan
+            min_indices[i]   = -1
+            continue
+
+        hbeta_res = np.abs((model_indices_3[:, 0] - obs[0]) / np.ptp(model_indices_3[:, 0]))
+        fe_res    = np.abs((model_indices_3[:, 1] - obs[1]) / np.ptp(model_indices_3[:, 1]))
+        mgb_res   = np.abs((model_indices_3[:, 2] - obs[2]) / np.ptp(model_indices_3[:, 2]))
+        quad_residual = np.sqrt(hbeta_res**2 + fe_res**2 + mgb_res**2)
+
+        min_idx = np.argmin(quad_residual)
+        min_params[i, :]  = params[min_idx, :]
+        min_residuals[i]  = quad_residual[min_idx]
+        min_indices[i]    = min_idx
+
+    printStatus.updateDone("Computing minimisation diagnostics (Hbeta_o, Fe5270, Mgb)", progressbar=False)
+
+    return min_params, min_residuals, min_indices
 
 def run_ls(
     wave,
@@ -46,6 +101,7 @@ def run_ls(
     nbins,
     i,
     MCMC,
+    method = 'integral',
 ):
     """
     Calls a Python version of the line strength measurement routine of
@@ -72,15 +128,33 @@ def run_ls(
     MCMC (bool): Flag for using MCMC algorithm
 
     Returns:
-    tuple: A tuple of indices, errors, vals, and percentiles
+    tuple: A tuple of indices, errors, and optionally vals, percentiles, and mc_chains
     """
-    # Display progress bar
-    # printStatus.progressBar(i, nbins, barLength=50)
     nindex = len(index_names)
 
     try:
-        # Measure the LS indices
-        names, indices, errors = lsindex.lsindex(
+        plot_flag = 0
+        plot_corner = False
+
+        resolution = config["LS"].get("_CURRENT_RESOLUTION", "ORIGINAL")
+        if resolution == "ADAPTED":
+            plot_bins = config["LS"].get("PLOT_BINS", False)
+            if plot_bins is True:
+                plot_flag = 1
+                plot_corner = True
+            elif isinstance(plot_bins, int) and i < plot_bins:
+                plot_flag = 1
+                plot_corner = True
+            elif isinstance(plot_bins, list) and i in plot_bins:
+                plot_flag = 1
+                plot_corner = True
+
+        plot_dir = os.path.join(config["GENERAL"]["OUTPUT"], "Fig_LS")
+        corner_dir = config["GENERAL"]["OUTPUT"]
+
+        if plot_flag == 1:
+            logging.info(f"Plotting enabled for bin {i}")
+        names, indices, errors, mc_chains = lsindex.lsindex(
             wave,
             spec,
             espec,
@@ -88,10 +162,13 @@ def run_ls(
             lickfile,
             sims=config["LS"]["MC_LS"],
             z_err=redshift[1],
-            plot=0,
+            plot=plot_flag,
+            method=method,
+            plot_dir=plot_dir,
+            bin_id=i,
+            run_id=config["GENERAL"]["RUN_ID"],
         )
 
-        # Get the indices in consideration
         data = np.zeros(nindex)
         error = np.zeros(nindex)
         for o in range(nindex):
@@ -100,12 +177,27 @@ def run_ls(
             error[o] = errors[idx]
 
         if MCMC == True:
-            # Run the conversion of LS indices to SSP properties
-            vals = np.zeros(len(labels) * 3 + 2)
-            chains = np.zeros(
-                (int(config["LS"]["NWALKER"] * config["LS"]["NCHAIN"] / 2), len(labels))
-            )
-            vals[:], chains[:, :] = ssppop.ssppop_fitting(
+            # Use minimisation solution (Hbeta_o, Fe5270, Mgb) as p0_centre if possible
+            target_indices = ['Hbeta_o', 'Fe5270', 'Mgb']
+            min_positions = [np.where(names == t)[0] for t in target_indices]
+
+            if all(len(pos) > 0 for pos in min_positions):
+                obs_3 = np.array([indices[pos[0]] for pos in min_positions])
+                model_col_order = [index_names.index(t) for t in target_indices if t in index_names]
+
+                if len(model_col_order) == 3 and not np.any(np.isnan(obs_3)):
+                    model_3 = model_indices[:, model_col_order]
+                    hbeta_res = np.abs((model_3[:, 0] - obs_3[0]) / np.ptp(model_3[:, 0]))
+                    fe_res    = np.abs((model_3[:, 1] - obs_3[1]) / np.ptp(model_3[:, 1]))
+                    mgb_res   = np.abs((model_3[:, 2] - obs_3[2]) / np.ptp(model_3[:, 2]))
+                    quad_res  = np.sqrt(hbeta_res**2 + fe_res**2 + mgb_res**2)
+                    p0_centre = params[np.argmin(quad_res), :]
+                else:
+                    p0_centre = None
+            else:
+                p0_centre = None
+
+            vals, chains = ssppop.ssppop_fitting(
                 data,
                 error,
                 model_indices,
@@ -114,25 +206,27 @@ def run_ls(
                 labels,
                 config["LS"]["NWALKER"],
                 config["LS"]["NCHAIN"],
-                False,
+                plot_corner,
                 0,
                 i,
                 nbins,
-                "",
+                corner_dir,
+                p0_centre=p0_centre,
             )
 
             percentiles = np.percentile(chains, np.arange(101), axis=0)
 
-            return (indices, errors, vals, percentiles)
+            return (indices, errors, vals, percentiles, mc_chains)
 
         elif MCMC == False:
-            return (indices, errors)
+            return (indices, errors, mc_chains)
 
-    except:
+    except Exception as e:
+        logging.warning(f"run_ls failed for bin {i}: {e}")
         if MCMC == True:
-            return (np.nan, np.nan, np.nan, np.nan)
+            return (np.nan, np.nan, np.nan, np.nan, np.nan)
         elif MCMC == False:
-            return (np.nan, np.nan)
+            return (np.nan, np.nan, np.nan)
 
 
 def save_ls(
@@ -145,8 +239,12 @@ def save_ls(
     MCMC,
     totalFWHM_flag,
     config,
+    mc_chains=None, 
     vals=None,
     percentile=None,
+    min_params=None, 
+    min_residuals=None, 
+    min_indices=None,
 ):
     """Saves all results to disk."""
     # Save results
@@ -183,17 +281,25 @@ def save_ls(
 
     ndim = len(names)
     for i in range(ndim):
-        if np.any(np.isnan(ls_indices[:, i])) == False:
+        if not np.all(np.isnan(ls_indices[:, i])):
             cols.append(fits.Column(name=names[i], format="D", array=ls_indices[:, i]))
-        if np.any(np.isnan(ls_errors[:, i])) == False:
+        if not np.all(np.isnan(ls_errors[:, i])):
             cols.append(
                 fits.Column(name="ERR_" + names[i], format="D", array=ls_errors[:, i])
             )
     cols.append(fits.Column(name="FWHM_FLAG", format="I", array=totalFWHM_flag[:]))
+
+    if min_params is not None:
+        cols.append(fits.Column(name="MIN_AGE",       format="D", array=min_params[:, 0]))
+        cols.append(fits.Column(name="MIN_METAL",     format="D", array=min_params[:, 1]))
+        cols.append(fits.Column(name="MIN_ALPHA",     format="D", array=min_params[:, 2]))
+        cols.append(fits.Column(name="MIN_RESIDUAL",  format="D", array=min_residuals))
+
     lsHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
     lsHDU.name = "LS_DATA"
 
     # Extension 2: Table HDU with percentiles
+    percentilesHDU = None
     if MCMC == True:
         cols = []
         nparam = len(labels)
@@ -206,15 +312,37 @@ def save_ls(
                 )
             )
         percentilesHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
-        percentilesHDU.anem = "PERCENTILES"
+        percentilesHDU.name = "PERCENTILES"
 
-    # Create HDUList
+    # Extension 3: Table HDU with MC chains
+    mcChainsHDU = None 
+    if mc_chains is not None:
+        cols_mc = []
+        ndim = len(names)
+        for i in range(ndim):
+            if not np.all(np.isnan(mc_chains[:, i, :])):
+                cols_mc.append(
+                    fits.Column(
+                        name=names[i] + "_MC",
+                        format=str(mc_chains.shape[2]) + "D",
+                        array=mc_chains[:, i, :]
+                    )
+                )
+        if len(cols_mc) > 0:
+            mcChainsHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols_mc))
+            mcChainsHDU.name = "MC_CHAINS"
+    
     if MCMC == False:
-        HDUList = fits.HDUList([priHDU, lsHDU])
+        if mcChainsHDU is not None:
+            HDUList = fits.HDUList([priHDU, lsHDU, mcChainsHDU])
+        else:
+            HDUList = fits.HDUList([priHDU, lsHDU])
     elif MCMC == True:
-        HDUList = fits.HDUList([priHDU, lsHDU, percentilesHDU])
-
-    # Write HDU list to file
+        if mcChainsHDU is not None:
+            HDUList = fits.HDUList([priHDU, lsHDU, percentilesHDU, mcChainsHDU])
+        else:
+            HDUList = fits.HDUList([priHDU, lsHDU, percentilesHDU])
+    
     HDUList.writeto(outfits, overwrite=True)
 
     if RESOLUTION == "ORIGINAL":
@@ -226,6 +354,7 @@ def save_ls(
             "Writing: " + config["GENERAL"]["RUN_ID"] + "_ls_adap_res.fits"
         )
     logging.info("Wrote: " + outfits)
+
 
 
 def saveCleanedLinearSpectra(spec, espec, wave, npix, config):
@@ -264,6 +393,42 @@ def saveCleanedLinearSpectra(spec, espec, wave, npix, config):
     logging.info("Wrote: " + outfits)
 
 
+def saveConvolvedLinearSpectra(spec, espec, wave, npix, config):
+    """Save emission-subtracted, linearly binned, convolved spectra to disk."""
+    outfits = (
+        os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
+        + "_ls_convolved_linear.fits"
+    )
+    printStatus.running(
+        "Writing: " + config["GENERAL"]["RUN_ID"] + "_ls_convolved_linear.fits"
+    )
+
+    # Primary HDU
+    priHDU = fits.PrimaryHDU()
+
+    # Extension 1: Table HDU with cleaned, linear spectra
+    cols = []
+    cols.append(fits.Column(name="SPEC", format=str(npix) + "D", array=spec))
+    cols.append(fits.Column(name="ESPEC", format=str(npix) + "D", array=espec))
+    dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    dataHDU.name = "CONVOLVED_SPECTRA"
+
+    # Extension 2: Table HDU with wave
+    cols = []
+    cols.append(fits.Column(name="LAM", format="D", array=wave))
+    logLamHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    logLamHDU.name = "LAM"
+
+    # Create HDU list and write to file
+    HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU])
+    HDUList.writeto(outfits, overwrite=True)
+
+    printStatus.updateDone(
+        "Writing: " + config["GENERAL"]["RUN_ID"] + "_ls_convolved_linear.fits"
+    )
+    logging.info("Wrote: " + outfits)
+
+
 def log_unbinning(lamRange, spec, oversample=1, flux=True):
     """
     This function transforms logarithmically binned spectra back to linear
@@ -295,6 +460,7 @@ def log_unbinning(lamRange, spec, oversample=1, flux=True):
         b = (borders[k[j + 1]] - newBorders[j + 1]) / dLam
 
         specNew[j] = np.sum(spec[k[j] : k[j + 1]]) - a * spec[k[j]] - b * spec[k[j + 1]]
+
 
     # Rescale flux
     if flux == True:
@@ -331,6 +497,15 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         MCMC = True
     else:
         MCMC = False
+    
+    # Get the method from config, default to 'integral'
+    method = config["LS"].get("METHOD_TYPE", "integral")
+
+    config["LS"]["_CURRENT_RESOLUTION"] = RESOLUTION
+    
+    # Log which method is being used
+    logging.info(f"Using line strength calculation method: {method}")
+    printStatus.running(f"Using calculation method: {method}")
 
     # Read LSF information
     LSF_Data, LSF_Templates = _auxiliary.getLSF(config, "LS")
@@ -389,8 +564,26 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         idx_lamMax = np.where(binned_loglam_data[-1] == binned_eloglam_data)[0]
         idx_lam = np.arange(idx_lamMin, idx_lamMax + 1)
         oldspec = np.array(binned_spec_data)
-        oldespec = np.sqrt(np.array(binned_espec_data)[:, idx_lam])
+        oldespec = np.sqrt(np.array(binned_espec_data)[:, idx_lam]) * 0.001
         wave = np.array(binned_loglam_data)
+
+        print("")
+        print("=" * 60)
+        print("DIAGNOSTIC: Error Spectrum Statistics")
+        print("=" * 60)
+        sn_per_bin = oldspec / oldespec
+        median_sn = np.median(sn_per_bin[np.isfinite(sn_per_bin)])
+        print(f"Median S/N across all bins: {median_sn:.2f}")
+        print(f"S/N range: {np.nanmin(sn_per_bin):.2f} to {np.nanmax(sn_per_bin):.2f}")
+        print(f"Error spectrum (oldespec) range: {np.nanmin(oldespec):.4e} to {np.nanmax(oldespec):.4e}")
+        print(f"Median error spectrum value: {np.nanmedian(oldespec):.4e}")
+        print(f"Flux spectrum (oldspec) range: {np.nanmin(oldspec):.4e} to {np.nanmax(oldspec):.4e}")
+        print(f"Median flux spectrum value: {np.nanmedian(oldspec):.4e}")
+        print("")
+        print("Expected S/N for line strength measurements: 20-100+")
+        print("If S/N is much lower, uncertainties will be large")
+        print("=" * 60)
+        print("")
 
         nbins = oldspec.shape[0]
         npix = oldspec.shape[1]
@@ -401,7 +594,6 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         # Rebin the cleaned spectra from log to lin
         printStatus.running("Rebinning the spectra from log to lin")
         for i in range(nbins):
-            # printStatus.progressBar(i, nbins, barLength=50)
             spec[i, :], wave = log_unbinning(lamRange, oldspec[i, :])
         printStatus.updateDone(
             "Rebinning the spectra from log to lin", progressbar=False
@@ -409,13 +601,25 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
 
         # Rebin the error spectra from log to lin
         printStatus.running("Rebinning the error spectra from log to lin")
-
         for i in range(nbins):
-            # printStatus.progressBar(i, nbins, barLength=50)
             espec[i, :], _ = log_unbinning(lamRange, oldespec[i, :])
         printStatus.updateDone(
             "Rebinning the error spectra from log to lin", progressbar=False
         )
+
+        print("")
+        print("=" * 60)
+        print("DIAGNOSTIC: After Log-to-Linear Rebinning")
+        print("=" * 60)
+        sn_after_rebin = spec / espec
+        median_sn_after = np.median(sn_after_rebin[np.isfinite(sn_after_rebin)])
+        print(f"Median S/N after rebinning: {median_sn_after:.2f}")
+        print(f"S/N range: {np.nanmin(sn_after_rebin):.2f} to {np.nanmax(sn_after_rebin):.2f}")
+        print("")
+        print("NOTE: S/N should remain roughly similar after rebinning")
+        print("Large changes may indicate error propagation issues")
+        print("=" * 60)
+        print("")
 
         # Save cleaned, linear spectra
         saveCleanedLinearSpectra(spec, espec, wave, npix, config)
@@ -435,6 +639,7 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         espec = np.array(hdu[1].data.ESPEC)
         wave = np.array(hdu[2].data.LAM)
         nbins = spec.shape[0]
+        npix = spec.shape[1]
 
     # Read PPXF results
     ppxf_data = fits.open(
@@ -442,9 +647,9 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         + "_kin.fits", 
         mem_map=True
     )[1].data
-    redshift = np.zeros((nbins, 2))  # Dimensionless z
-    redshift[:, 0] = np.array(ppxf_data.V[:]) / cvel  # Redshift
-    redshift[:, 1] = np.array(ppxf_data.FORM_ERR_V[:]) / cvel  # Error on redshift
+    redshift = np.zeros((nbins, 2))
+    redshift[:, 0] = np.array(ppxf_data.V[:]) / cvel
+    redshift[:, 1] = np.array(ppxf_data.FORM_ERR_V[:]) / cvel
     veldisp_kin = np.array(ppxf_data.SIGMA[:])
 
     # Read file defining the LS bands
@@ -458,42 +663,27 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
     # Broaden spectra to LIS resolution taking into account the measured velocity dispersion
     if RESOLUTION == "ADAPTED":
         printStatus.running("Broadening the spectra to LIS resolution")
-        # Open the HDF5 file
         with h5py.File(
             os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) 
             + "_bin_spectra.hdf5", 
             'r',
         ) as f:
-            # Read the VELSCALE attribute from the file
             velscale = f.attrs["VELSCALE"]
-        # Iterate over all bins
         for i in range(0, nbins):
-            # printStatus.progressBar(i, nbins, barLength=50)
-
-            # Convert velocity dispersion of galaxy (from PPXF) to Angstrom
             veldisp_kin_Angst = veldisp_kin[i] * wave / cvel * 2.355
-
-            # Total dispersion for this bin
             total_dispersion = np.sqrt(LSF_Data(wave) ** 2 + veldisp_kin_Angst**2)
-
-            # Difference between total dispersion and LIS measurement resolution
             FWHM_dif = np.sqrt(config["LS"]["CONV_COR"] ** 2 - total_dispersion**2)
-
-            # Convert resolution difference from Angstrom to pixel
             sigma = (FWHM_dif / wave) * cvel / 2.355 / velscale
-
-            # Flag spectrum if the total intrinsic dispersion is larger than the LIS measurement resolution
             idx = np.where(np.isnan(sigma) == True)[0]
             if len(idx) > 0:
                 sigma[idx] = 0.0
                 totalFWHM_flag[i] = 1
-
-            # Convolve spectra pixel-wise
             spec[i, :] = gaussian_filter1d(spec[i, :], sigma)
             espec[i, :] = gaussian_filter1d(espec[i, :], sigma)
         printStatus.updateDone(
             "Broadening the spectra to LIS resolution", progressbar=False
         )
+        saveConvolvedLinearSpectra(spec, espec, wave, npix, config)
 
     # Get indices that are considered in SSP-conversion
     idx = np.where(tab["spp"] == 1)[0]
@@ -512,6 +702,7 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
     # Arrays to store results
     ls_indices = np.zeros((nbins, len(names)))
     ls_errors = np.zeros((nbins, len(names)))
+    mc_chains_all = np.zeros((nbins, len(names), config["LS"]["MC_LS"]))
     if MCMC == True:
         vals = np.zeros((nbins, len(labels) * 3 + 2))
         percentile = np.zeros((nbins, 101, len(labels)))
@@ -522,17 +713,7 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         printStatus.running("Running lineStrengths in parallel mode")
         logging.info("Running lineStrengths in parallel mode")
 
-        # Define a function to encapsulate the work done in the loop
         def worker(chunk):
-            """
-            Apply run_ls() to a chunk of data and return the results.
-
-            Args:
-                chunk (list): A list of indices representing the data chunk to process.
-
-            Returns:
-                list: A list of results obtained from processing the chunk.
-            """
             results = []
             for i in chunk:
                 result = run_ls(
@@ -551,19 +732,17 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
                     nbins,
                     i,
                     MCMC,
+                    method=method,
                 )
                 results.append(result)
             return results
 
-        # Prepare the folder where the memmap will be dumped
         memmap_folder = (
             "/scratch" 
             if os.access("/scratch", os.W_OK) 
             else config["GENERAL"]["OUTPUT"]
         )
-        
-        # Use joblib to parallelize the work
-        max_nbytes = None  # max array size before memory mapping is triggered (None = disabled memory mapping, see https://github.com/scikit-learn-contrib/hdbscan/pull/495#issue-1014324032)
+        max_nbytes = None
         chunk_size = max(1, nbins // (config["GENERAL"]["NCPU"] * 10))
         chunks = [
             range(i, min(i + chunk_size, nbins)) for i in range(0, nbins, chunk_size)
@@ -586,14 +765,13 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
                 unit="chunk",
             )
         )
-
-        # Flatten the results
         ppxf_tmp = [result for chunk_results in ppxf_tmp for result in chunk_results]
 
         for i in range(0, nbins):
-            ls_indices[i, :], ls_errors[i, :], *extra = ppxf_tmp[i]
             if MCMC == True:
-                vals[i, :], percentile[i, :, :] = extra
+                ls_indices[i, :], ls_errors[i, :], vals[i, :], percentile[i, :, :], mc_chains_all[i, :, :] = ppxf_tmp[i]
+            else:
+                ls_indices[i, :], ls_errors[i, :], mc_chains_all[i, :, :] = ppxf_tmp[i]
 
         printStatus.updateDone(
             "Running lineStrengths in parallel mode", progressbar=False
@@ -610,6 +788,7 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
                     ls_errors[i, :],
                     vals[i, :],
                     percentile[i, :, :],
+                    mc_chains_all[i, :, :],
                 ) = run_ls(
                     wave,
                     spec[i, :],
@@ -626,10 +805,11 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
                     nbins,
                     i,
                     MCMC,
+                    method=method,
                 )
         elif MCMC == False:
             for i in range(nbins):
-                ls_indices[i, :], ls_errors[i, :] = run_ls(
+                ls_indices[i, :], ls_errors[i, :], mc_chains_all[i, :, :] = run_ls(
                     wave,
                     spec[i, :],
                     espec[i, :],
@@ -645,6 +825,7 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
                     nbins,
                     i,
                     MCMC,
+                    method=method,
                 )
 
         printStatus.updateDone(
@@ -676,33 +857,37 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         logging.info("There were no problems in the analysis.")
     print("")
 
-    # Save Results
-    if MCMC == True:
-        save_ls(
-            names,
-            ls_indices,
-            ls_errors,
-            index_names,
-            labels,
-            RESOLUTION,
-            MCMC,
-            totalFWHM_flag,
-            config,
-            vals=vals,
-            percentile=percentile,
-        )
-    elif MCMC == False:
-        save_ls(
-            names,
-            ls_indices,
-            ls_errors,
-            index_names,
-            labels,
-            RESOLUTION,
-            MCMC,
-            totalFWHM_flag,
-            config,
-        )
+    min_params, min_residuals = None, None
+    if config["LS"]["TYPE"] == "SPP":
+        if isinstance(model_indices, str) and model_indices == "dummy":
+            modelfile = os.path.join(
+                config["GENERAL"]["TEMPLATE_DIR"], config["LS"]["SPP_FILE"]
+            )
+            model_indices, params, tri, labels = ssppop.load_models(
+                modelfile, index_names
+            )
+            logging.info(
+                "Loading LIS templates for minimisation diagnostics: " + modelfile
+            )
+
+        min_params, min_residuals, _ = calculate_minimisation_diagnostics(ls_indices, names, model_indices, params, config, index_names)
+
+    save_ls(
+        names,
+        ls_indices,
+        ls_errors,
+        index_names,
+        labels,
+        RESOLUTION,
+        MCMC,
+        totalFWHM_flag,
+        config,
+        mc_chains=mc_chains_all,
+        vals=vals if MCMC else None,
+        percentile=percentile if MCMC else None,
+        min_params=min_params,
+        min_residuals=min_residuals,
+    )
 
     # Repeat analysis with adapted spectral resolution
     if RESOLUTION == "ORIGINAL":

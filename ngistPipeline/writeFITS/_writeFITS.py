@@ -137,12 +137,8 @@ def generateFITS(config, module):
     if module == "LS":
         try:
             printStatus.running("Producing line strength maps in FITS format")
-            save_maps_fits.savefitsmaps_LSmodule(
-                "LS", config["GENERAL"]["OUTPUT"], "ORIGINAL"
-            )
-            save_maps_fits.savefitsmaps_LSmodule(
-                "LS", config["GENERAL"]["OUTPUT"], "ADAPTED"
-            )
+            save_maps_fits.savefitsmaps_LSmodule(config["GENERAL"]["OUTPUT"], "ORIGINAL")
+            save_maps_fits.savefitsmaps_LSmodule(config["GENERAL"]["OUTPUT"], "ADAPTED")
             printStatus.updateDone("Producing line strength maps in FITS format")
             logging.info("Produced line strength maps in FITS format")
         except Exception as e:

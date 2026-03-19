@@ -18,8 +18,10 @@ from astropy.io import ascii, fits
 #  NOTE: Input spectra is assumed to be in Angstroms.
 #
 # Jesus Falcon-Barroso, IAC, August 2016
+# Modified to include integral EW calculation, Michelle Ding, Jan 2026
+
 # ===============================================================================
-# ===============================================================================
+
 def printProgress(iteration, total, prefix="", suffix="", decimals=2, barLength=100):
     """
     Call in a loop to create terminal progress bar
@@ -51,16 +53,13 @@ def load_inputlist(inlist):
 
 # ==============================================================================
 #
-# FUNCTION: sum_counts()
+# FUNCTION: sum_counts() - Original method
 #
 def sum_counts(ll, c, b1, b2):
     # Central full pixel range
     dw = ll[1] - ll[0]  # linear step size
     w = (ll >= b1 + dw / 2.0) & (ll <= b2 - dw / 2.0)
     s = numpy.sum(c[w])
-
-    #    print( len( w[w==True] ) )
-    #    normalise = len( w[w==True] )
 
     # First fractional pixel
     pixb = (ll < b1 + dw / 2.0) & (ll > b1 - dw / 2.0)
@@ -74,15 +73,39 @@ def sum_counts(ll, c, b1, b2):
         fracr = (b2 - (ll[pixr] - dw / 2.0)) / dw
         s = s + c[pixr] * fracr
 
-    #    s = s / (normalise + fracr + fracb )
-    #    print(normalise, fracr, fracb, normalise + fracr + fracb)
-
     return s
-
 
 # ==============================================================================
 #
-# FUNCTION: calc_index()
+# FUNCTION: flux_density_integral() - Updated method
+#
+def flux_density_integral(wave_full, flux, wave1, wave2):
+    # Create mask for pixels in or near the range
+    mask = (wave_full >= wave1 - 10) & (wave_full <= wave2 + 10)
+    
+    if not numpy.any(mask):
+        return 0.0
+    
+    wave_region = wave_full[mask]
+    flux_region = flux[mask]
+    
+    # Interpolate flux at exact boundaries
+    flux_at_wave1 = numpy.interp(wave1, wave_region, flux_region)
+    flux_at_wave2 = numpy.interp(wave2, wave_region, flux_region)
+    
+    # Build integration arrays including boundaries
+    wave_integrate = numpy.concatenate([[wave1], wave_region[
+        (wave_region > wave1) & (wave_region < wave2)], [wave2]])
+    flux_integrate = numpy.concatenate([[flux_at_wave1], flux_region[
+        (wave_region > wave1) & (wave_region < wave2)], [flux_at_wave2]])
+    
+    # Integrate and return average
+    integrated = numpy.trapz(flux_integrate, wave_integrate)
+    return integrated / (wave2 - wave1)
+
+# ==============================================================================
+#
+# FUNCTION: calc_index() - Original sum-based method
 #
 def calc_index(bands, name, ll, counts, plot):
     cb = sum_counts(ll, counts, bands[0], bands[1])
@@ -98,16 +121,12 @@ def calc_index(bands, name, ll, counts, plot):
     c2 = (m * (bands[3] - lb)) + cb
     cont = 0.5 * (c1 + c2) * (bands[3] - bands[2])
 
-    #   print( cb, cr, s )
-    #   plot = 1
-
     if bands[6] == 1.0:
         # atomic index
         ind = (1.0 - (s / cont)) * (bands[3] - bands[2])
     elif bands[6] == 2.0:
         # molecular index
         ind = -2.5 * numpy.log10(s / cont)
-    #   print( ind )
 
     if plot > 0:
         minx = bands[0] - 0.05 * (bands[5] - bands[0])
@@ -115,7 +134,6 @@ def calc_index(bands, name, ll, counts, plot):
         miny = numpy.amin(counts) - 0.05 * (numpy.amax(counts) - numpy.amin(counts))
         maxy = numpy.amax(counts) + 0.05 * (numpy.amax(counts) - numpy.amin(counts))
         plt.figure()
-        #      plt.plot(ll,counts,'k')
         plt.scatter(ll, counts, color="k")
         plt.xlabel("Wavelength ($\AA$)")
         plt.ylabel("Counts")
@@ -135,6 +153,107 @@ def calc_index(bands, name, ll, counts, plot):
 
 
 # ==============================================================================
+#
+# FUNCTION: calc_index_integral() - New integral-based method
+#
+def calc_index_integral(bands, name, ll, counts, plot, plot_dir=None, bin_id=None, run_id=None):
+    # Calculate continuum fluxes
+    continuum_blue_flux = flux_density_integral(ll, counts, bands[0], bands[1])
+    continuum_blue_midpoint = 0.5 * (bands[0] + bands[1])
+    
+    continuum_red_flux = flux_density_integral(ll, counts, bands[4], bands[5])
+    continuum_red_midpoint = 0.5 * (bands[4] + bands[5])
+    
+    # Calculate continuum slope
+    slope = (continuum_red_flux - continuum_blue_flux) / (continuum_red_midpoint - continuum_blue_midpoint)
+    
+    # Get feature region with proper boundaries
+    mask = (ll >= bands[2] - 10) & (ll <= bands[3] + 10)
+    wave_region = ll[mask]
+    flux_region = counts[mask]
+    
+    # Interpolate at feature boundaries
+    flux_at_feat_start = numpy.interp(bands[2], wave_region, flux_region)
+    flux_at_feat_end = numpy.interp(bands[3], wave_region, flux_region)
+    
+    # Build feature arrays
+    feature_wave = numpy.concatenate([[bands[2]], wave_region[
+        (wave_region > bands[2]) & (wave_region < bands[3])], [bands[3]]])
+    feature_flux = numpy.concatenate([[flux_at_feat_start], flux_region[
+        (wave_region > bands[2]) & (wave_region < bands[3])], [flux_at_feat_end]])
+    
+    # Calculate continuum at each wavelength in feature
+    continuum_at_feature = continuum_blue_flux + slope * (feature_wave - continuum_blue_midpoint)
+    
+    # Calculate equivalent width
+    if bands[6] == 1.0:
+        # Atomic index
+        ind = numpy.trapz(1 - feature_flux / continuum_at_feature, feature_wave)
+    elif bands[6] == 2.0:
+        # Molecular index
+        feature_integral = numpy.trapz(feature_flux, feature_wave)
+        continuum_integral = numpy.trapz(continuum_at_feature, feature_wave)
+        ind = -2.5 * numpy.log10(feature_integral / continuum_integral)
+    else:
+        ind = numpy.nan
+    
+    # Plotting
+    if plot > 0:
+        # Create wavelength mask for zoomed region
+        mask = (ll >= bands[0] - 5) & (ll <= bands[5] + 5)
+        
+        fig = plt.figure(figsize=(7, 4))
+        plt.plot(ll[mask], counts[mask], color='black', linewidth=1.5)
+        
+        # Draw the continuum line across the whole index region
+        cont_left  = (slope * (bands[0] - continuum_blue_midpoint)) + continuum_blue_flux
+        cont_right = (slope * (bands[5] - continuum_blue_midpoint)) + continuum_blue_flux
+        plt.plot([bands[0], bands[5]], [cont_left, cont_right], color="red", linewidth=2, label="Continuum")
+
+        # Shade pseudo-continua and feature
+        plt.axvspan(bands[0], bands[1], color="skyblue", alpha=0.5, label="Pseudo-continua")
+        plt.axvspan(bands[2], bands[3], color="grey", alpha=0.2, label="Central Bandpass")
+        plt.axvspan(bands[4], bands[5], color="skyblue", alpha=0.5)
+
+        # Labels and legend
+        plt.xlabel('Wavelength [$\\AA$]')
+        plt.ylabel('Flux')
+        plt.title(f"BIN={bin_id} : {name}")
+
+        handles, labels_legend = plt.gca().get_legend_handles_labels()
+        by_label = dict(zip(labels_legend, handles))
+        plt.legend(by_label.values(), by_label.keys(),
+                title=f"EW = {float(ind):.4f} Å", loc="lower right")
+        
+        plt.tight_layout()
+        
+        # Save or close the figure
+        if plot_dir is not None:
+            import os
+            
+            # Create index-specific subdirectory: plot_dir/INDEX_NAME/
+            index_plot_dir = os.path.join(plot_dir, name)
+            if not os.path.exists(index_plot_dir):
+                os.makedirs(index_plot_dir)
+            
+            # Create filename: RUN_ID_ls_INDEX_NAME_bin_XXXX.png
+            if run_id is not None and bin_id is not None:
+                filename = f"{run_id}_ls_{name}_bin_{bin_id:04d}.png"
+            elif bin_id is not None:
+                filename = f"bin_{bin_id:04d}.png"
+            else:
+                filename = f"{name}.png"
+            
+            filepath = os.path.join(index_plot_dir, filename)
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+        else:
+            plt.close(fig)
+
+    return ind
+
+
+# ==============================================================================
 # purpose : Measure line-strength indices
 #
 # input : ll    - wavelength vector; assumed to be in *linear steps*
@@ -146,6 +265,7 @@ def calc_index(bands, name, ll, counts, plot):
 # keywords  debug  - more than 0 gives some basic info
 #           plot   - plot spectra
 #           sims   - number of simulations for the errors (default: 100)
+#           method - 'sum' or 'integral' (default: 'integral')
 #
 # output : names       - index names
 #          index       - index values
@@ -154,8 +274,10 @@ def calc_index(bands, name, ll, counts, plot):
 # author : J. Falcon-Barroso
 #
 # version : 1.0  IAC (08/07/16) A re-coding of H. Kuntschner's IDL routine into python
+# version : 2.0  Modified to include integral-based calculation method
 # ==============================================================================
-def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0):
+def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0, method='integral',
+            plot_dir=None, bin_id=None, run_id=None):
     # Deredshift spectrum to rest wavelength
     dll = (ll) / (z + 1.0)
 
@@ -174,17 +296,28 @@ def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0):
     bands[5, :] = tab["b6"]
     bands[6, :] = tab["b7"]
 
+    # Select calculation method
+    if method == 'integral':
+        calc_func = calc_index_integral
+    elif method == 'sum':
+        calc_func = calc_index
+
     # Measure line indices
     num_ind = len(bands[0, :])
     index = numpy.zeros(num_ind)
     for k in range(num_ind):  # loop through all indices
-        # check wether the wavelength range is o.k.
+        # check whether the wavelength range is o.k.
         if (dll[0] <= bands[0, k]) and (dll[len(dll) - 1] >= bands[5, k]):
             # calculate index value
-            index0 = calc_index(bands[:, k], names[k], dll, flux, plot)
-            index[k] = index0[0]
+            if method == 'integral':
+                index0 = calc_func(bands[:, k], names[k], dll, flux, plot,
+                                  plot_dir=plot_dir, bin_id=bin_id, run_id=run_id)
+            else:
+                index0 = calc_func(bands[:, k], names[k], dll, flux, plot)
+                
+            index[k] = index0 if numpy.isscalar(index0) else index0[0]
         else:
-            # index outside wavelegth range
+            # index outside wavelength range
             index[k] = numpy.nan
 
     # Calculate errors
@@ -209,8 +342,13 @@ def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0):
                 dll = ll / (sz + 1.0)
                 bands2 = bands[:, k]
                 if (dll[0] <= bands2[0]) and (dll[len(dll) - 1] >= bands2[5]):
-                    tmp = calc_index(bands2, names[k], dll, flux_n, 0)
-                    index_noise[k, i] = tmp
+                    if method == 'integral':
+                        tmp = calc_func(bands2, names[k], dll, flux_n, 0,
+                                       plot_dir=None, bin_id=None, run_id=None)
+                    else:
+                        tmp = calc_func(bands2, names[k], dll, flux_n, 0)
+                    
+                    index_noise[k, i] = tmp if numpy.isscalar(tmp) else tmp[0]
                 else:
                     # index outside wavelength range
                     index_noise[k, i] = numpy.nan
@@ -218,7 +356,7 @@ def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0):
         # Get STD of distribution (index error)
         index_error = numpy.std(index_noise, axis=1)
 
-    return names, index, index_error
+    return names, index, index_error, index_noise
 
 
 # ==============================================================================
@@ -232,7 +370,7 @@ if __name__ == "__main__":
 
     # Capturing the command line arguments
     parser = optparse.OptionParser(
-        usage="%prog -i inputlist -l lickfile -o outfits -n nsims"
+        usage="%prog -i inputlist -l lickfile -o outfits -n nsims -m method"
     )
     parser.add_option(
         "-i",
@@ -274,6 +412,14 @@ if __name__ == "__main__":
         default="0",
         help="Plotting or not [0/1]",
     )
+    parser.add_option(
+        "-m",
+        "--method",
+        dest="method",
+        type="string",
+        default="sum",
+        help="Calculation method: 'sum' or 'integral' (default: 'integral')",
+    )
 
     (options, args) = parser.parse_args()
     inputlist = options.inputlist
@@ -281,12 +427,14 @@ if __name__ == "__main__":
     outfits = options.outfits
     nsims = options.nsims
     plot_flag = options.plot
+    method = options.method
 
     # Getting the list of FITS files to process
     print("# Loading inputlist: " + inputlist)
     inlist, redshift, err_redshift = load_inputlist(inputlist)
     nfiles = len(inlist)
     print("- " + str(nfiles) + " files found")
+    print("# Using calculation method: " + method)
     print("")
 
     # Computing the magnitudes for each input FITS file
@@ -304,7 +452,7 @@ if __name__ == "__main__":
         root = numpy.append(root, os.path.basename(inlist[i]))
 
         # Computing the indices
-        names, indices, errors = lsindex(
+        names, indices, errors, _ = lsindex(
             wave,
             flux,
             flux * 0.1,
@@ -313,6 +461,7 @@ if __name__ == "__main__":
             plot=plot_flag,
             sims=nsims,
             z_err=err_redshift[i],
+            method=method,
         )
 
         if i == 0:
