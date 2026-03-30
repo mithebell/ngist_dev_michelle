@@ -84,7 +84,7 @@ def sum_counts(ll, c, b1, b2):
 #
 # FUNCTION: calc_index()
 #
-def calc_index(bands, name, ll, counts, plot):
+def calc_index(bands, name, ll, counts, plot, plot_dir=None, bin_id=None, run_id=None):
     cb = sum_counts(ll, counts, bands[0], bands[1])
     cr = sum_counts(ll, counts, bands[4], bands[5])
     s = sum_counts(ll, counts, bands[2], bands[3])
@@ -114,8 +114,7 @@ def calc_index(bands, name, ll, counts, plot):
         maxx = bands[5] + 0.05 * (bands[5] - bands[0])
         miny = numpy.amin(counts) - 0.05 * (numpy.amax(counts) - numpy.amin(counts))
         maxy = numpy.amax(counts) + 0.05 * (numpy.amax(counts) - numpy.amin(counts))
-        plt.figure()
-        #      plt.plot(ll,counts,'k')
+        fig = plt.figure()
         plt.scatter(ll, counts, color="k")
         plt.xlabel("Wavelength ($\AA$)")
         plt.ylabel("Counts")
@@ -125,11 +124,25 @@ def calc_index(bands, name, ll, counts, plot):
         dw = ll[1] - ll[0]
         plt.plot([lb, lr], [c1 * dw, c2 * dw], "r")
         good = (ll >= bands[2]) & (ll <= bands[3])
-        ynew = numpy.interp(ll, [lb, lr], [c1[0] * dw, c2[0] * dw])
+        ynew = numpy.interp(ll, [lb, lr], [c1 * dw, c2 * dw])
         plt.fill_between(ll[good], counts[good], ynew[good], facecolor="green")
         for i in range(len(bands)):
             plt.plot([bands[i], bands[i]], [miny, maxy], "k--")
-        plt.show()
+
+        if plot_dir is not None:
+            index_plot_dir = os.path.join(plot_dir, name)
+            if not os.path.exists(index_plot_dir):
+                os.makedirs(index_plot_dir)
+            if run_id is not None and bin_id is not None:
+                filename = f"{run_id}_ls_{name}_bin_{bin_id:04d}.png"
+            elif bin_id is not None:
+                filename = f"bin_{bin_id:04d}.png"
+            else:
+                filename = f"{name}.png"
+            plt.savefig(os.path.join(index_plot_dir, filename), dpi=300, bbox_inches='tight')
+            plt.close(fig)
+        else:
+            plt.close(fig)
 
     return ind
 
@@ -155,7 +168,8 @@ def calc_index(bands, name, ll, counts, plot):
 #
 # version : 1.0  IAC (08/07/16) A re-coding of H. Kuntschner's IDL routine into python
 # ==============================================================================
-def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0):
+def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0,
+            plot_dir=None, bin_id=None, run_id=None):
     # Deredshift spectrum to rest wavelength
     dll = (ll) / (z + 1.0)
 
@@ -181,8 +195,9 @@ def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0):
         # check wether the wavelength range is o.k.
         if (dll[0] <= bands[0, k]) and (dll[len(dll) - 1] >= bands[5, k]):
             # calculate index value
-            index0 = calc_index(bands[:, k], names[k], dll, flux, plot)
-            index[k] = index0[0]
+            index0 = calc_index(bands[:, k], names[k], dll, flux, plot,
+                                plot_dir=plot_dir, bin_id=bin_id, run_id=run_id)
+            index[k] = index0
         else:
             # index outside wavelegth range
             index[k] = numpy.nan
@@ -209,7 +224,8 @@ def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0):
                 dll = ll / (sz + 1.0)
                 bands2 = bands[:, k]
                 if (dll[0] <= bands2[0]) and (dll[len(dll) - 1] >= bands2[5]):
-                    tmp = calc_index(bands2, names[k], dll, flux_n, 0)
+                    tmp = calc_index(bands2, names[k], dll, flux_n, 0,
+                                    plot_dir=None, bin_id=None, run_id=None)
                     index_noise[k, i] = tmp
                 else:
                     # index outside wavelength range

@@ -96,6 +96,7 @@ def run_ls(
                 plot_corner = True
 
         corner_dir = config["GENERAL"]["OUTPUT"]
+        plot_dir = os.path.join(config["GENERAL"]["OUTPUT"], "Fig_LS")
 
         if plot_flag == 1:
             logging.info(f"Plotting enabled for bin {i}")
@@ -110,6 +111,9 @@ def run_ls(
             sims=config["LS"]["MC_LS"],
             z_err=redshift[1],
             plot=plot_flag,
+            plot_dir=plot_dir,
+            bin_id=i,
+            run_id=config["GENERAL"]["RUN_ID"],
         )
 
         # Get the indices in consideration
@@ -594,6 +598,8 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
     ls_indices = np.zeros((nbins, len(names)))
     ls_errors = np.zeros((nbins, len(names)))
     mc_chains_all = np.zeros((nbins, len(names), config["LS"]["MC_LS"]))
+    vals = None
+    percentile = None
     if MCMC == True:
         vals = np.zeros((nbins, len(labels) * 3 + 2))
         percentile = np.zeros((nbins, 101, len(labels)))
