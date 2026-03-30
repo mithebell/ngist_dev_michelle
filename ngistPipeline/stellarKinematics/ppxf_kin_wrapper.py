@@ -405,14 +405,6 @@ def run_ppxf(
         noise_est = robust_sigma(pp.galaxy[goodPixels] - pp.bestfit[goodPixels])
         snr_postfit = np.nanmedian(pp.galaxy[goodPixels]/noise_est)
 
-        # Make the unconvolved optimal stellar template
-        normalized_weights = pp.weights / np.sum(pp.weights)
-        optimal_template = np.zeros(templates.shape[0])
-        for j in range(0, templates.shape[1]):
-            optimal_template = (
-                optimal_template + templates[:, j] * normalized_weights[j]
-            )
-
         # Correct the formal errors assuming that the fit is good
         formal_error = pp.error * np.sqrt(pp.chi2)
 
@@ -489,7 +481,6 @@ def run_ppxf(
         return(
             pp.sol[:],
             pp.bestfit,
-            optimal_template,
             mc_results,
             formal_error,
             spectral_mask,
@@ -501,7 +492,7 @@ def run_ppxf(
         )
 
     except:
-        return (np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
+        return (np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
 
 
 def save_ppxf(
@@ -512,7 +503,6 @@ def save_ppxf(
     ppxf_bestfit,
     logLam,
     goodPixels,
-    optimal_template,
     logLam_template,
     npix,
     spectral_mask,
@@ -662,12 +652,6 @@ def save_ppxf(
     apolyHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
     apolyHDU.name = "APOLY"
 
-    # Table HDU with per-bin optimal templates
-    cols = []
-    cols.append(fits.Column(name="OPTIMAL_TEMPLATES", format=str(optimal_template.shape[1]) + "D", array=optimal_template))
-    optHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
-    optHDU.name = "OPTIMAL_TEMPLATES"
-
     # Create HDU list and write to file
     priHDU = _auxiliary.saveConfigToHeader(priHDU, config["KIN"])
     dataHDU = _auxiliary.saveConfigToHeader(dataHDU, config["KIN"])
@@ -678,9 +662,8 @@ def save_ppxf(
     goodpixClnHDU = _auxiliary.saveConfigToHeader(goodpixClnHDU, config["KIN"])
     mpolyHDU = _auxiliary.saveConfigToHeader(mpolyHDU, config["KIN"])
     apolyHDU = _auxiliary.saveConfigToHeader(apolyHDU, config["KIN"])
-    optHDU = _auxiliary.saveConfigToHeader(optHDU, config["KIN"])
 
-    HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU, logLamTempHDU, specHDU, goodpixHDU, goodpixClnHDU, mpolyHDU, apolyHDU, optHDU])
+    HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU, logLamTempHDU, specHDU, goodpixHDU, goodpixClnHDU, mpolyHDU, apolyHDU])
     HDUList.writeto(outfits_ppxf, overwrite=True)
 
     printStatus.updateDone(
@@ -833,7 +816,6 @@ def extractStellarKinematics(config):
     # Array to store results of ppxf
     ppxf_result = np.zeros((nbins, 6))
     ppxf_bestfit = np.zeros((nbins, npix))
-    optimal_template = np.zeros((nbins, templates.shape[0]))
     mc_results = np.zeros((nbins, 6))
     formal_error = np.zeros((nbins, 6))
     spectral_mask = np.zeros((nbins, bin_data.shape[0]))
@@ -945,15 +927,14 @@ def extractStellarKinematics(config):
         for i in range(0, nbins):
             ppxf_result[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][0]
             ppxf_bestfit[i, :] = ppxf_tmp[i][1]
-            optimal_template[i, :] = ppxf_tmp[i][2]
-            mc_results[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][3]
-            formal_error[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][4]
-            spectral_mask[i, :] = ppxf_tmp[i][5]
-            snr_postfit[i] = ppxf_tmp[i][6]
-            red_chi2[i] = ppxf_tmp[i][7]
-            EBV[i] = ppxf_tmp[i][8]
-            mpoly[i, :] = ppxf_tmp[i][9]
-            apoly[i, :] = ppxf_tmp[i][10]
+            mc_results[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][2]
+            formal_error[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][3]
+            spectral_mask[i, :] = ppxf_tmp[i][4]
+            snr_postfit[i] = ppxf_tmp[i][5]
+            red_chi2[i] = ppxf_tmp[i][6]
+            EBV[i] = ppxf_tmp[i][7]
+            mpoly[i, :] = ppxf_tmp[i][8]
+            apoly[i, :] = ppxf_tmp[i][9]
 
         # Testing
         formal_error[:, 0] = 0.0  # Velocity error (km/s)
@@ -981,7 +962,6 @@ def extractStellarKinematics(config):
             (
                 ppxf_result[i, : config["KIN"]["MOM"]],
                 ppxf_bestfit[i, :],
-                optimal_template[i, :],
                 mc_results[i, : config["KIN"]["MOM"]],
                 formal_error[i, : config["KIN"]["MOM"]],
                 spectral_mask[i, :],
@@ -1057,7 +1037,6 @@ def extractStellarKinematics(config):
         ppxf_bestfit,
         logLam,
         goodPixels_kin,
-        optimal_template,
         logLam_template,
         npix,
         spectral_mask,

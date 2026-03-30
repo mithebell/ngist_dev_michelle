@@ -421,14 +421,6 @@ def run_ppxf(
         noise_est = robust_sigma(pp.galaxy[goodPixels] - pp.bestfit[goodPixels])
         snr_postfit = np.nanmean(pp.galaxy[goodPixels]/noise_est)
 
-        # Make the unconvolved optimal stellar template
-        reshaped_templates = templates.reshape((templates.shape[0], ncomb)) #
-        normalized_weights = pp.weights / np.sum( pp.weights ) #
-        optimal_template   = np.zeros( reshaped_templates.shape[0] )
-
-        for j in range(0, reshaped_templates.shape[1]):
-            optimal_template = optimal_template + reshaped_templates[:,j]*normalized_weights[j]
-
         # Correct the formal errors assuming that the fit is good
         formal_error = pp.error * np.sqrt(pp.chi2)
         weights = pp.weights.reshape(templates.shape[1:])/pp.weights.sum() # Take from 1D list to nD array (nAges, nMet, nAlpha)
@@ -537,7 +529,6 @@ def run_ppxf(
             pp.sol[:],
             w_row,
             pp.bestfit,
-            optimal_template,
             mc_results,
             formal_error,
             spectral_mask,
@@ -559,8 +550,7 @@ def run_ppxf(
                 "mean_results_MC_mean":  np.nan,
                 "mean_results_MC_err":  np.nan
             }
-        return( np.nan, np.nan, np.nan, np.nan, mc_results_nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
-
+        return( np.nan, np.nan, np.nan, mc_results_nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
 
 def mean_agemetalalpha(w_row, ageGrid, metalGrid, alphaGrid, nbins):
     """
@@ -583,7 +573,6 @@ def save_sfh(
     ppxf_bestfit,
     logLam,
     goodPixels,
-    optimal_template,
     logLam_template,
     npix,
     spectral_mask,
@@ -809,12 +798,6 @@ def save_sfh(
     mpolyHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
     mpolyHDU.name = "MPOLY"
 
-    # Table HDU with per-bin optimal templates
-    cols = []
-    cols.append(fits.Column(name="OPTIMAL_TEMPLATES", format=str(optimal_template.shape[1]) + "D", array=optimal_template))
-    optHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
-    optHDU.name = "OPTIMAL_TEMPLATES"
-
     # Create HDU list and write to file
     priHDU = _auxiliary.saveConfigToHeader(priHDU, config["SFH"])
     dataHDU = _auxiliary.saveConfigToHeader(dataHDU, config["SFH"])
@@ -824,9 +807,7 @@ def save_sfh(
     goodpixHDU = _auxiliary.saveConfigToHeader(goodpixHDU, config["SFH"])
     goodpixClnHDU = _auxiliary.saveConfigToHeader(goodpixClnHDU, config["SFH"])
     mpolyHDU = _auxiliary.saveConfigToHeader(mpolyHDU, config["SFH"])
-    optHDU = _auxiliary.saveConfigToHeader(optHDU, config["SFH"])
-    HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU, logLamTempHDU, specHDU, goodpixHDU, goodpixClnHDU, mpolyHDU, optHDU])
-    HDUList.writeto(outfits_sfh, overwrite=True)
+    HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU, logLamTempHDU, specHDU, goodpixHDU, goodpixClnHDU, mpolyHDU])
 
     fits.setval(outfits_sfh, "VELSCALE", value=velscale)
     fits.setval(outfits_sfh, "CRPIX1", value=1.0)
@@ -1018,7 +999,6 @@ def extractStarFormationHistories(config):
     ppxf_result = np.zeros((nbins,6    ))
     w_row = np.zeros((nbins,ncomb))
     ppxf_bestfit = np.zeros((nbins,npix))
-    optimal_template = np.zeros((nbins,templates.shape[0]))
     formal_error = np.zeros((nbins,6))
     spectral_mask = np.zeros((nbins,bin_data.shape[0]))
     snr_postfit = np.zeros(nbins)
@@ -1148,19 +1128,18 @@ def extractStarFormationHistories(config):
             ppxf_result[i,:config["SFH"]["MOM"]] = ppxf_tmp[i][0]
             w_row[i,:] = ppxf_tmp[i][1]
             ppxf_bestfit[i,:] = ppxf_tmp[i][2]
-            optimal_template[i,:] = ppxf_tmp[i][3]
-            w_row_MC_iter[i,:,:] = ppxf_tmp[i][4]["w_row_MC_iter"]
-            w_row_MC_mean[i,:] = ppxf_tmp[i][4]["w_row_MC_mean"]
-            w_row_MC_err[i,:] = ppxf_tmp[i][4]["w_row_MC_err"]
-            mean_results_MC_iter[i,:,:] = ppxf_tmp[i][4]["mean_results_MC_iter"]
-            mean_results_MC_mean[i,:]  = ppxf_tmp[i][4]["mean_results_MC_mean"]
-            mean_results_MC_err[i,:]  = ppxf_tmp[i][4]["mean_results_MC_err"]
-            formal_error[i,:config["SFH"]["MOM"]] = ppxf_tmp[i][5]
-            spectral_mask[i,:] = ppxf_tmp[i][6]
-            snr_postfit[i] = ppxf_tmp[i][7]
-            red_chi2[i] = ppxf_tmp[i][8]
-            EBV[i] = ppxf_tmp[i][9]
-            mpoly[i,:] = ppxf_tmp[i][10]
+            w_row_MC_iter[i,:,:] = ppxf_tmp[i][3]["w_row_MC_iter"]
+            w_row_MC_mean[i,:] = ppxf_tmp[i][3]["w_row_MC_mean"]
+            w_row_MC_err[i,:] = ppxf_tmp[i][3]["w_row_MC_err"]
+            mean_results_MC_iter[i,:,:] = ppxf_tmp[i][3]["mean_results_MC_iter"]
+            mean_results_MC_mean[i,:]  = ppxf_tmp[i][3]["mean_results_MC_mean"]
+            mean_results_MC_err[i,:]  = ppxf_tmp[i][3]["mean_results_MC_err"]
+            formal_error[i,:config["SFH"]["MOM"]] = ppxf_tmp[i][4]
+            spectral_mask[i,:] = ppxf_tmp[i][5]
+            snr_postfit[i] = ppxf_tmp[i][6]
+            red_chi2[i] = ppxf_tmp[i][7]
+            EBV[i] = ppxf_tmp[i][8]
+            mpoly[i,:] = ppxf_tmp[i][9]
 
         # Remove the memory-mapped files
         os.remove(templates_filename_memmap)
@@ -1186,7 +1165,6 @@ def extractStarFormationHistories(config):
                 ppxf_result[i,:config["SFH"]["MOM"]],
                 w_row[i,:],
                 ppxf_bestfit[i,:],
-                optimal_template[i,:],
                 mc_results_i,
                 formal_error[i,:config["SFH"]["MOM"]],
                 spectral_mask[i,:],
@@ -1275,7 +1253,6 @@ def extractStarFormationHistories(config):
         ppxf_bestfit,
         logLam,
         goodPixels_sfh,
-        optimal_template,
         logLam_template,
         npix,
         spectral_mask,
