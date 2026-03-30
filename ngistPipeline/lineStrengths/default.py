@@ -28,7 +28,6 @@ PURPOSE:
 
 def calculate_minimisation_diagnostics(ls_indices, names, model_indices, params, config, index_names):
     target_indices = ['Hbeta_o', 'Fe5270', 'Mgb']
-
     obs_indices_positions = []
     found_indices = []
     for target in target_indices:
@@ -41,7 +40,7 @@ def calculate_minimisation_diagnostics(ls_indices, names, model_indices, params,
         logging.warning(f"Not all minimisation indices found. Found: {found_indices}")
         printStatus.warning(f"Expected Hbeta_o, Fe5270, Mgb — found: {found_indices}")
         nbins = ls_indices.shape[0]
-        return np.full((nbins, 3), np.nan), np.full(nbins, np.nan), np.full(nbins, -1, dtype=int)
+        return np.full((nbins, params.shape[1]), np.nan), np.full(nbins, np.nan), np.full(nbins, -1, dtype=int)
 
     obs_indices_positions = np.array(obs_indices_positions)
 
@@ -50,16 +49,17 @@ def calculate_minimisation_diagnostics(ls_indices, names, model_indices, params,
         if target not in index_names:
             logging.warning(f"{target} not in index_names — cannot map to model column")
             nbins = ls_indices.shape[0]
-            return np.full((nbins, 3), np.nan), np.full(nbins, np.nan), np.full(nbins, -1, dtype=int)
+            return np.full((nbins, params.shape[1]), np.nan), np.full(nbins, np.nan), np.full(nbins, -1, dtype=int)
         model_column_order.append(index_names.index(target))
 
     model_indices_3 = model_indices[:, model_column_order]
 
     nbins = ls_indices.shape[0]
     nmodels = model_indices_3.shape[0]
-    min_params   = np.zeros((nbins, 3))
+    ndim_params   = params.shape[1]
+    min_params    = np.zeros((nbins, ndim_params))
     min_residuals = np.zeros(nbins)
-    min_indices  = np.zeros(nbins, dtype=int)
+    min_indices   = np.zeros(nbins, dtype=int)
 
     printStatus.running("Computing minimisation diagnostics (Hbeta_o, Fe5270, Mgb)")
 
@@ -138,7 +138,7 @@ def run_ls(
 
         resolution = config["LS"].get("_CURRENT_RESOLUTION", "ORIGINAL")
         if resolution == "ADAPTED":
-            plot_bins = config["LS"].get("PLOT_BINS", False)
+            plot_bins = config["LS"].get("PLOT", False)
             if plot_bins is True:
                 plot_flag = 1
                 plot_corner = True
@@ -185,7 +185,7 @@ def run_ls(
                 obs_3 = np.array([indices[pos[0]] for pos in min_positions])
                 model_col_order = [index_names.index(t) for t in target_indices if t in index_names]
 
-                if len(model_col_order) == 3 and not np.any(np.isnan(obs_3)):
+                if len(model_col_order) == len(target_indices) and not np.any(np.isnan(obs_3)):
                     model_3 = model_indices[:, model_col_order]
                     hbeta_res = np.abs((model_3[:, 0] - obs_3[0]) / np.ptp(model_3[:, 0]))
                     fe_res    = np.abs((model_3[:, 1] - obs_3[1]) / np.ptp(model_3[:, 1]))
@@ -279,6 +279,12 @@ def save_ls(
         cols.append(fits.Column(name="lnP", format="D", array=vals[:, -2]))
         cols.append(fits.Column(name="Flag", format="D", array=vals[:, -1]))
 
+    if min_params is not None:
+        param_col_names = ["MIN_AGE", "MIN_METAL", "MIN_ALPHA"]
+        for k in range(min_params.shape[1]):
+            cols.append(fits.Column(name=param_col_names[k], format="D", array=min_params[:, k]))
+        cols.append(fits.Column(name="MIN_RESIDUAL",  format="D", array=min_residuals))
+
     ndim = len(names)
     for i in range(ndim):
         if not np.all(np.isnan(ls_indices[:, i])):
@@ -288,12 +294,6 @@ def save_ls(
                 fits.Column(name="ERR_" + names[i], format="D", array=ls_errors[:, i])
             )
     cols.append(fits.Column(name="FWHM_FLAG", format="I", array=totalFWHM_flag[:]))
-
-    if min_params is not None:
-        cols.append(fits.Column(name="MIN_AGE",       format="D", array=min_params[:, 0]))
-        cols.append(fits.Column(name="MIN_METAL",     format="D", array=min_params[:, 1]))
-        cols.append(fits.Column(name="MIN_ALPHA",     format="D", array=min_params[:, 2]))
-        cols.append(fits.Column(name="MIN_RESIDUAL",  format="D", array=min_residuals))
 
     lsHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
     lsHDU.name = "LS_DATA"
@@ -567,24 +567,6 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         oldespec = np.sqrt(np.array(binned_espec_data)[:, idx_lam]) * 0.001
         wave = np.array(binned_loglam_data)
 
-        print("")
-        print("=" * 60)
-        print("DIAGNOSTIC: Error Spectrum Statistics")
-        print("=" * 60)
-        sn_per_bin = oldspec / oldespec
-        median_sn = np.median(sn_per_bin[np.isfinite(sn_per_bin)])
-        print(f"Median S/N across all bins: {median_sn:.2f}")
-        print(f"S/N range: {np.nanmin(sn_per_bin):.2f} to {np.nanmax(sn_per_bin):.2f}")
-        print(f"Error spectrum (oldespec) range: {np.nanmin(oldespec):.4e} to {np.nanmax(oldespec):.4e}")
-        print(f"Median error spectrum value: {np.nanmedian(oldespec):.4e}")
-        print(f"Flux spectrum (oldspec) range: {np.nanmin(oldspec):.4e} to {np.nanmax(oldspec):.4e}")
-        print(f"Median flux spectrum value: {np.nanmedian(oldspec):.4e}")
-        print("")
-        print("Expected S/N for line strength measurements: 20-100+")
-        print("If S/N is much lower, uncertainties will be large")
-        print("=" * 60)
-        print("")
-
         nbins = oldspec.shape[0]
         npix = oldspec.shape[1]
         lamRange = np.array([wave[0], wave[-1]])
@@ -606,20 +588,6 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         printStatus.updateDone(
             "Rebinning the error spectra from log to lin", progressbar=False
         )
-
-        print("")
-        print("=" * 60)
-        print("DIAGNOSTIC: After Log-to-Linear Rebinning")
-        print("=" * 60)
-        sn_after_rebin = spec / espec
-        median_sn_after = np.median(sn_after_rebin[np.isfinite(sn_after_rebin)])
-        print(f"Median S/N after rebinning: {median_sn_after:.2f}")
-        print(f"S/N range: {np.nanmin(sn_after_rebin):.2f} to {np.nanmax(sn_after_rebin):.2f}")
-        print("")
-        print("NOTE: S/N should remain roughly similar after rebinning")
-        print("Large changes may indicate error propagation issues")
-        print("=" * 60)
-        print("")
 
         # Save cleaned, linear spectra
         saveCleanedLinearSpectra(spec, espec, wave, npix, config)
@@ -781,8 +749,15 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         printStatus.running("Running lineStrengths in serial mode")
         logging.info("Running lineStrengths in serial mode")
 
+        if 'DEBUG_BIN' in config["LS"] and config["LS"]["DEBUG_BIN"] is not False:
+            runbin = config["LS"]["DEBUG_BIN"]
+            printStatus.running("Running lineStrengths in debug mode on bins: " + str(runbin))
+            logging.info("Running lineStrengths in debug mode on bins: " + str(runbin))
+        else:
+            runbin = np.arange(0, nbins)
+
         if MCMC == True:
-            for i in range(nbins):
+            for i in runbin:
                 (
                     ls_indices[i, :],
                     ls_errors[i, :],
@@ -808,7 +783,7 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
                     method=method,
                 )
         elif MCMC == False:
-            for i in range(nbins):
+            for i in runbin:
                 ls_indices[i, :], ls_errors[i, :], mc_chains_all[i, :, :] = run_ls(
                     wave,
                     spec[i, :],
@@ -892,6 +867,11 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
     # Repeat analysis with adapted spectral resolution
     if RESOLUTION == "ORIGINAL":
         measureLineStrengths(config, RESOLUTION="ADAPTED")
+        # Convert DEBUG_BIN to string for FITS header after both passes complete
+        if 'DEBUG_BIN' in config["LS"] and config["LS"]["DEBUG_BIN"] is not False:
+            config["LS"]["DEBUG_BIN"] = str(config["LS"]["DEBUG_BIN"])
+
+    return None
 
     # Return
     return None

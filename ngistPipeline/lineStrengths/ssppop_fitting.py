@@ -74,12 +74,24 @@ def load_models(modelfile, index_names):
         model_indices[:, i] = tmp
 
     ## Creating the triangulation array
-    params = numpy.empty((nmodels, 3))
-    params[:, 0] = model.field("AGE")
-    params[:, 1] = model.field("MET")
-    params[:, 2] = model.field("ALPHA")
+    alpha_vals = model.field("ALPHA")
+    n_unique_alpha = len(numpy.unique(alpha_vals))
+    single_alpha = (n_unique_alpha == 1)
+
+    if single_alpha:
+        params = numpy.empty((nmodels, 2))
+        params[:, 0] = model.field("AGE")
+        params[:, 1] = model.field("MET")
+        labels = ["AGE", "METAL"]
+        logging.info(f"Single alpha value detected ({alpha_vals[0]:.3f}) — fitting in 2D (age, metallicity)")
+    else:
+        params = numpy.empty((nmodels, 3))
+        params[:, 0] = model.field("AGE")
+        params[:, 1] = model.field("MET")
+        params[:, 2] = alpha_vals
+        labels = ["AGE", "METAL", "ALPHA"]
+
     tri = qhull.Delaunay(params, qhull_options="QJ")
-    labels = ["AGE", "METAL", "ALPHA"]
 
     return model_indices, params, tri, labels
 
@@ -141,20 +153,11 @@ def interpolate(values, vtx, wts):
 
 # ==============================================================================
 def lnprior(par, model_pars):
-    # par = [Age, Met, Alpha] in no particular order
-    if (
-        # Rejecting solutions outside some boundary limits
-        (par[0] >= numpy.amin(model_pars[:, 0]))
-        and (par[0] <= numpy.amax(model_pars[:, 0]))
-        and (par[1] >= numpy.amin(model_pars[:, 1]))
-        and (par[1] <= numpy.amax(model_pars[:, 1]))
-        and (par[2] >= numpy.amin(model_pars[:, 2]))
-        and (par[2] <= numpy.amax(model_pars[:, 2]))
-    ):
-        return 0.0
-
-    return -numpy.inf
-
+    ndim = model_pars.shape[1]
+    for k in range(ndim):
+        if not (numpy.amin(model_pars[:, k]) <= par[k] <= numpy.amax(model_pars[:, k])):
+            return -numpy.inf
+    return 0.0
 
 # ==============================================================================
 def compute_indices(par, data, model_indices, params, tri):
@@ -220,7 +223,7 @@ def ssppop_fitting(
     param_range = param_max - param_min
 
     if p0_centre is not None:
-        kick_scales = numpy.array([1.0, 0.1, 0.05])
+        kick_scales = numpy.array([1.0, 0.1, 0.05])[:ndim]
         p0 = []
         for _ in range(nwalkers):
             for _ in range(1000):
@@ -335,7 +338,7 @@ def ssppop_fitting(
 
     # Computing the chi2
     out_indices = compute_indices(
-        [outpars[0], outpars[3], outpars[6]], data, model_indices, params, tri
+        [outpars[i * 3] for i in range(ndim)], data, model_indices, params, tri
     )
     if numpy.any(numpy.isnan(out_indices)):
         outpars[3 * ndim] = numpy.nan
