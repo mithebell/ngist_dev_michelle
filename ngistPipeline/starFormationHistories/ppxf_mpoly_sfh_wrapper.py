@@ -1,0 +1,1335 @@
+import logging
+import os
+import time
+
+import h5py
+import numpy as np
+import ppxf as ppxf_package
+import code
+
+from astropy.io import fits
+from astropy.stats import biweight_location
+from joblib import Parallel, delayed, dump, load
+from packaging import version
+from ppxf.ppxf import ppxf
+from printStatus import printStatus
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+#import extinction
+
+from ngistPipeline.auxiliary import _auxiliary
+from ngistPipeline.prepareTemplates import _prepareTemplates
+
+import warnings
+warnings.filterwarnings("ignore")
+
+# Physical constants
+C = 299792.458  # speed of light in km/s
+
+
+"""
+PURPOSE:
+  This module performs the extraction of non-parametric star-formation histories
+  by full-spectral fitting.  Basically, it acts as an interface between pipeline
+  and the pPXF routine from Cappellari & Emsellem 2004
+  (ui.adsabs.harvard.edu/?#abs/2004PASP..116..138C;
+  ui.adsabs.harvard.edu/?#abs/2017MNRAS.466..798C).
+"""
+def plot_ppxf_sfh(pp ,x, i,outfig_ppxf, snrCubevar=-99, snrResid=-99, goodpixelsPre=[], 
+                  norm=False,mean_results=''):
+    #routine to plot first and final pPXF fit
+    fig = plt.figure(i, figsize=(13, 3.0))
+
+    #plot second figure
+    ax2 = plt.subplot(111)
+
+    if norm == True:
+        median_norm = np.nanmedian(pp.galaxy[pp.goodpixels])
+    else:
+        median_norm = 1
+
+    stars_bestfit = pp.bestfit #/ median_norm
+    bestfit_shown = pp.bestfit #/ median_norm
+    galaxy = pp.galaxy #/ median_norm
+    resid = galaxy - stars_bestfit
+    goodpixels = pp.goodpixels
+    
+    ll, rr = np.min(x), np.max(x)
+    
+    sig3 = np.percentile(abs(resid[goodpixels]), 99.73)
+    bestfit_shown = bestfit_shown[goodpixels[0] : goodpixels[-1] + 1]
+    mx = 2.49
+    mn = -0.49
+    plt.plot(x, galaxy, 'black', linewidth=0.5)
+    plt.plot(x[goodpixels], resid[goodpixels], 'd',
+                color='LimeGreen', mec='LimeGreen', ms=1)
+    
+    if len(goodpixelsPre) > 0:
+        w = np.flatnonzero(np.diff(goodpixels) > 1)
+        for wj in w:
+            a, b = goodpixels[wj : wj + 2]
+            plt.axvspan(x[a], x[b], facecolor='lightpink')
+            plt.plot(x[a : b + 1], resid[a : b + 1], 'green', linewidth=0.5,alpha=0.5)
+        for k in goodpixels[[0, -1]]:
+            plt.plot(x[[k, k]], [mn, stars_bestfit[k]], 'lightpink', linewidth=0.5)
+
+        #repeat square lines with  pp_step1
+            w = np.flatnonzero(np.diff(goodpixelsPre) > 1)
+        for wj in w:
+            a, b = goodpixelsPre[wj : wj + 2]
+            plt.axvspan(x[a], x[b], facecolor='lightgray')
+        for k in goodpixelsPre[[0, -1]]:
+            plt.plot(x[[k, k]], [mn, stars_bestfit[k]], 'lightgray', linewidth=0.5)
+    else:
+        w = np.flatnonzero(np.diff(goodpixels) > 1)
+        for wj in w:
+            a, b = goodpixels[wj : wj + 2]
+            plt.axvspan(x[a], x[b], facecolor='lightgray')
+            plt.plot(x[a : b + 1], resid[a : b + 1], 'green', linewidth=0.5, alpha=0.5)
+        for k in goodpixels[[0, -1]]:
+            plt.plot(x[[k, k]], [mn, stars_bestfit[k]], 'lightgray', linewidth=0.5)
+    
+    plt.plot(x[goodpixels], goodpixels*0, '.k', ms=1)
+    plt.plot(x, stars_bestfit, 'red', linewidth=0.5)
+    ax2.set(xlabel='wavelength [Ang]', ylabel='Flux [normalised]')
+    ax2.set(ylim=(mn,mx))
+    ax2.tick_params(direction='in', which='both') 
+    ax2.minorticks_on()
+    ax2.xaxis.set_minor_locator(ticker.AutoMinorLocator(10))
+
+    nmom = np.max(pp.moments)
+
+    if nmom == 2:
+        plotText = (f"nGIST - Bin {i:10.0f}: Vel = {pp.sol[0]:.0f}, Sig = {pp.sol[1]:.0f}")+\
+                    (f", S/N Residual = {snrResid:.1f}")
+    if nmom == 4:
+        plotText = (f"nGIST - Bin {i:10.0f}: Vel = {pp.sol[0]:.0f}, Sig = {pp.sol[1]:.0f}, h3 = {pp.sol[2]:.3f}, h4 = {pp.sol[3]:.3f}")+\
+                    (f", S/N Residual = {snrResid:.1f}")        
+    if nmom == 6:            
+        plotText = (f"nGIST - Bin {i:10.0f}: Vel = {pp.sol[0]:.0f}, Sig = {pp.sol[1]:.0f}, h3 = {pp.sol[2]:.3f}, h4 = {pp.sol[3]:.3f}, ")+\
+                    (f"h5 = {pp.sol[4]:.3f}, h6 = {pp.sol[5]:.3f}")+\
+                    (f", S/N Residual = {snrResid:.1f}")   
+    
+    if len(mean_results) > 0:
+        plotText += (f", Age [Gyr] = {mean_results[0][0]:.2f}, [M/H] = {mean_results[0][1]:.2f}")+\
+        (", [alpha/Fe] = ")+(f"{mean_results[0][2]:.2f}")
+
+    #plt.plot(x,pp.mpoly,color='orchid',linewidth=1.0)
+
+    plt.text(0.01,0.95, plotText, fontsize=10, ha='left', va='top',transform=ax2.transAxes, backgroundcolor='white')
+    plt.savefig(outfig_ppxf, bbox_inches='tight', pad_inches=0.3)
+    plt.close()
+
+def clip_outliers(galaxy, bestfit, mask):
+    """
+    Repeat the fit after clipping bins deviants more than 3*sigma in relative
+    error until the bad bins don't change any more. This function uses eq.(34)
+    of Cappellari (2023) https://ui.adsabs.harvard.edu/abs/2023MNRAS.526.3273C
+    """
+    while True:
+        scale = galaxy[mask] @ bestfit[mask]/np.sum(bestfit[mask]**2)
+        resid = scale*bestfit[mask] - galaxy[mask]
+        err = robust_sigma(resid, zero=1)
+        ok_old = mask
+        mask = np.abs(bestfit - galaxy) < 3*err
+        if np.array_equal(mask, ok_old):
+            break
+            
+    return mask
+
+def robust_sigma(y, zero=False):
+     """
+     Biweight estimate of the scale (standard deviation).
+     Implements the approach described in
+     "Understanding Robust and Exploratory Data Analysis"
+     Hoaglin, Mosteller, Tukey ed., 1983, Chapter 12B, pg. 417
+     Added for sigma-clipping method
+     """
+     np.seterr(all='ignore') # to avoid getting a lot of warnings in zerodivide
+
+     y = np.ravel(y)
+     d = y if zero else y - np.median(y)
+
+     mad = np.median(np.abs(d))
+     u2 = (d/(9.0*mad))**2  # c = 9
+     good = u2 < 1.0
+     u1 = 1.0 - u2[good]
+     num = y.size * ((d[good]*u1**2)**2).sum()
+     den = (u1*(1.0 - 5.0*u2[good])).sum()
+     sigma = np.sqrt(num/(den*(den - 1.0)))  # see note in above reference
+
+     return sigma
+
+def run_ppxf_firsttime(
+    templates,
+    log_bin_data,
+    log_bin_error,
+    velscale,
+    start,
+    goodPixels,
+    nmoments,
+    offset,
+    degree,
+    mdeg,
+    regul,
+    velscale_ratio,
+    ncomb,
+):
+    """
+    Call PPXF for first time to get optimal template
+    """
+
+    printStatus.running("Running pPXF for the first time")
+    # normalise galaxy spectra and noise
+    median_log_bin_data = np.nanmedian(log_bin_data)
+    log_bin_error = log_bin_error / median_log_bin_data
+    log_bin_data = log_bin_data / median_log_bin_data
+    pp = ppxf(
+        templates,
+        log_bin_data,
+        log_bin_error,
+        velscale,
+        start,
+        goodpixels=goodPixels,
+        plot=False,
+        quiet=True,
+        moments=nmoments,
+        degree=-1,
+        vsyst=offset,
+        mdegree=mdeg,
+        regul = regul,
+        velscale_ratio=velscale_ratio,
+    )
+
+    # Templates shape is currently [Wavelength, nAge, nMet, nAlpha]. Reshape to [Wavelength, ncomb] to create optimal template
+    reshaped_templates = templates.reshape((templates.shape[0], ncomb))
+    normalized_weights = pp.weights / np.sum( pp.weights )
+    
+    optimal_template   = np.zeros((templates.shape[0],1))
+    nonzero_weights = np.shape(np.where(normalized_weights > 0)[0])[0]
+    optimal_template_set = np.zeros( [templates.shape[0], nonzero_weights])
+    printStatus.running('Number of Templates with non-zero weights ' +str(nonzero_weights))
+    
+    count_nonzero = 0
+    for j in range(0, reshaped_templates.shape[1]):
+        optimal_template[:,0] = optimal_template[:,0] + reshaped_templates[:,j]*normalized_weights[j]
+        if normalized_weights[j] > 0:
+            optimal_template_set[:,count_nonzero] = reshaped_templates[:,j]
+            count_nonzero += 1
+
+
+    return optimal_template, optimal_template_set
+
+def run_ppxf(
+    templates,
+    log_bin_data,
+    log_bin_error,
+    velscale,
+    start,
+    goodPixels_step0,
+    goodPixels,
+    nmoments,
+    offset,
+    dv,
+    mdeg,
+    regul,
+    doclean,
+    fixed,
+    velscale_ratio,
+    npix,
+    ncomb,
+    nbins,
+    i,
+    optimal_template_in,
+    EBV_init,
+    logLam,
+    nsims,
+    idx_lam_sfh,
+    logLam_full,
+    logLam_template,
+    logAge_grid,
+    metal_grid,
+    alpha_grid,
+    config,
+    doplot,
+):
+
+    """
+    Calls the penalised Pixel-Fitting routine from Cappellari & Emsellem 2004
+    (ui.adsabs.harvard.edu/?#abs/2004PASP..116..138C;
+    ui.adsabs.harvard.edu/?#abs/2017MNRAS.466..798C), in order to determine the
+    non-parametric star-formation histories.
+    """
+    # printStatus.progressBar(i, nbins, barLength=50)
+
+    try:
+        if len(optimal_template_in) > 1:
+
+            # Normalise galaxy spectra and noise
+            median_log_bin_data = np.nanmedian(log_bin_data)
+            log_bin_error = log_bin_error / median_log_bin_data
+            log_bin_data = log_bin_data / median_log_bin_data
+
+            # Calculate SNR before the fit from flux and flux_err
+            snr_prefit = np.nanmedian(log_bin_data/log_bin_error)
+
+            # Here add in the extra, 0th step to estimate the dust and print out the E(B-V) map
+            # Call PPXF, using an extinction law, no polynomials.
+            # First define the dust law (from cappellari 2023):
+            component_step0 = [0] *  np.prod(optimal_template_in.shape[1:])
+            component_true_step0 = np.array(component_step0) == 0
+            dust = [{"start": [EBV_init], "bounds": [[0, 8]], "component": component_true_step0}]
+
+            pp_step0 = ppxf(optimal_template_in, log_bin_data, log_bin_error, velscale, lam=np.exp(logLam), 
+                            goodpixels=goodPixels_step0,degree=-1, mdegree=-1, vsyst=offset, 
+                            velscale_ratio=velscale_ratio,moments=nmoments, start=start, plot=False, 
+                            dust = dust, component = component_step0, regul=0, quiet=True)
+
+
+            # check which optimal template method is preferred. If default rederive optimal set from step 0
+            if config["SFH"]["OPT_TEMP"] == "default":
+
+                # first reshape templates so that we can apply the weights
+                reshaped_templates = templates.reshape((templates.shape[0], ncomb))
+                
+                # find non zero weights from step 0
+                normalized_weights_step0 = pp_step0.weights / np.sum( pp_step0.weights )
+                wNonzero_weights_step0 = np.where(normalized_weights_step0 > 0)[0] # where Nonzero
+                nNonzero_weights_step0 = np.shape(wNonzero_weights_step0)[0] # number of Nonzero templates
+
+                # prepare optimal template set
+                optimal_template_set_step0 = np.zeros( [reshaped_templates.shape[0], nNonzero_weights_step0])
+                # combine non-zero templates into set to pass on step 1 and step 2
+                for j in range(0, nNonzero_weights_step0):
+                        optimal_template_set_step0[:,j] = reshaped_templates[:,wNonzero_weights_step0[j]]
+
+                # replace optimal template with set from step zero
+                optimal_template_in = optimal_template_set_step0
+                
+            # Save dust values
+            Rv = 4.05
+            Av = pp_step0.dust[0]["sol"][0]
+            EBV = Av/Rv
+
+            # Define the components to be fit (True for all templates)
+            component_step12 = [0]*(np.shape(optimal_template_in)[1])
+            component_true_step12 = np.array(component_step12) == 0
+            component_step3 = [0]*ncomb
+            component_true_step3 = np.array(component_step3) == 0
+
+            # apply the dust correction if keyword is set:
+            if config["SFH"]["DUST_CORR"] == True:
+                # old approach --> remove extinction from spectra
+                #log_bin_data_save = log_bin_data
+                #log_bin_data_tmp = extinction.remove(extinction.calzetti00(np.exp(logLam), Av, Rv), log_bin_data)
+                #median_log_bin_data_tmp = np.median(log_bin_data_tmp) # save number for later
+                #log_bin_data = (log_bin_data_tmp/median_log_bin_data_tmp)
+                #log_bin_error_tmp = extinction.remove(extinction.calzetti00(np.exp(logLam), Av, Rv), log_bin_error)
+                #log_bin_error = (log_bin_error_tmp/np.median(log_bin_error_tmp))
+                dust_step12 = [{"start": [Av], "bounds": [[0, 8]], "component": component_true_step12, 
+                                          "fixed": [True]}]
+
+                dust_step3 = [{"start": [Av], "bounds": [[0, 8]], "component": component_true_step3, 
+                         "fixed":[True]}]
+            else:
+                dust_step12 = None
+                dust_step3 = None
+
+            # First Call PPXF - do fit and estimate noise
+            # use fake noise for first iteration
+            fake_noise=np.full_like(log_bin_data, 1.0)
+
+            pp_step1 = ppxf(
+                optimal_template_in,
+                log_bin_data,
+                fake_noise,
+                velscale,
+                start,
+                goodpixels=goodPixels_step0,
+                plot=False,
+                quiet=True,
+                moments=nmoments,
+                degree=-1,
+                vsyst=offset,
+                mdegree=mdeg,
+                fixed=fixed,
+                lam=np.exp(logLam),
+                velscale_ratio=velscale_ratio,
+                component=component_step12,
+                dust=dust_step12,                
+            )
+            
+            goodPixels_preclip = goodPixels
+            # Find a proper estimate of the noise
+            noise_orig = np.mean(log_bin_error[goodPixels_step0])
+            noise_est = robust_sigma(
+                pp_step1.galaxy[goodPixels_step0]-pp_step1.bestfit[goodPixels_step0])
+
+            # Calculate SNR postfit
+            snr_Resid1 = np.nanmedian(pp_step1.galaxy[goodPixels_step0]/noise_est)
+            # Calculate the new noise, and the sigma of the distribution.
+            noise_new = log_bin_error*(noise_est/noise_orig)
+            noise_new_std = robust_sigma(noise_new)
+
+            # A temporary fix for the noise issue where a single high S/N spaxel causes clipping of the entire spectrum
+            noise_new[np.where(noise_new <= noise_est-noise_new_std)] = noise_est
+
+
+            ################ 2 ##################
+            # Second step (formely done with pPXF CLEAN)
+            # switch to mask instead of goodpixels
+            mask0 = logLam > 0
+            mask0[:] = False
+            mask0[goodPixels] = True
+            mask = mask0.copy()
+            
+            if doclean == True:
+                # Now use new function to clip outliers
+                mask = clip_outliers(log_bin_data, pp_step1.bestfit, mask)
+                # Add clipped pixels to the original masked emission lines regions and repeat the fit
+                mask &= mask0
+
+            ################ 3 ##################
+            # Crop to science wavelength range (LMIN/LMAX) for Step 3
+            log_bin_data_sfh = log_bin_data[idx_lam_sfh]
+            noise_new_sfh    = noise_new[idx_lam_sfh]
+            logLam_sfh       = logLam_full[idx_lam_sfh]
+            mask_sfh         = mask[idx_lam_sfh]
+
+            # Pre-apply the full-range MPOLY from Step 1 to the cropped spectrum.
+            # This fixes the continuum shape from the full-range fit so that
+            # Step 3 only fits stellar population weights with mdegree=0.
+            mpoly_full            = pp_step1.mpoly if pp_step1.mpoly is not None else np.ones(len(log_bin_data))
+            mpoly_sfh             = mpoly_full[idx_lam_sfh]
+            log_bin_data_sfh_corr = log_bin_data_sfh / mpoly_sfh
+            noise_new_sfh_corr    = noise_new_sfh / mpoly_sfh
+
+            # Recompute components for Step 3
+            component_step3      = [0] * ncomb
+            component_true_step3 = np.array(component_step3) == 0
+            if config["SFH"]["DUST_CORR"] == True:
+                dust_step3 = [{"start": [Av], "bounds": [[0, 8]],
+                               "component": component_true_step3, "fixed": [True]}]
+            else:
+                dust_step3 = None
+
+            # Third Call PPXF - science fit over LMIN/LMAX
+            # mdegree=1: minimal polynomial to satisfy capfit, continuum already corrected by full-range MPOLY above
+            # vsyst: pPXF computes offset from lam and lam_temp
+            pp = ppxf(
+                templates,
+                log_bin_data_sfh_corr,
+                noise_new_sfh_corr,
+                velscale,
+                start,
+                mask=mask_sfh,
+                plot=False,
+                quiet=True,
+                moments=nmoments,
+                degree=-1,
+                mdegree=1,
+                regul=regul,
+                fixed=fixed,
+                lam=np.exp(logLam_sfh),
+                lam_temp=np.exp(logLam_template),
+                velscale_ratio=velscale_ratio,
+                component=component_step3,
+                dust=dust_step3,
+            )
+
+        #update goodpixels again
+        goodPixels = pp.goodpixels
+
+        #make spectral mask
+        spectral_mask = np.full_like(log_bin_data_sfh, 0.0)
+        spectral_mask[goodPixels] = 1.0
+
+        # Calculate the true S/N from the residual
+        noise_est = robust_sigma(pp.galaxy[goodPixels] - pp.bestfit[goodPixels])
+        snr_postfit = np.nanmean(pp.galaxy[goodPixels]/noise_est)
+
+        # Correct the formal errors assuming that the fit is good
+        formal_error = pp.error * np.sqrt(pp.chi2)
+        weights = pp.weights.reshape(templates.shape[1:])/pp.weights.sum() # Take from 1D list to nD array (nAges, nMet, nAlpha)
+        w_row   = np.array([np.reshape(weights, ncomb)])
+
+        #plotting output
+        if doplot == True:
+
+            # check if figure  folder exists, otherwise
+            outfigDir = os.path.join(config["GENERAL"]["OUTPUT"],"FigFit_SFH")
+            if os.path.exists(outfigDir) == False:
+                printStatus.running("Creating directory for pPXF figures:" + outfigDir)
+                os.mkdir(outfigDir)
+            
+            outfigFile_step1 = (
+                os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
+                                + "_sfh_bin_"+str(i)+"_step1.pdf"))
+            outfigFile_step3 = (
+                os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
+                                + "_sfh_bin_"+str(i)+"_step3.pdf"))
+
+            #calculate mean age, metallicity, and alpha step 1
+            mean_results_step3 = mean_agemetalalpha(w_row, 10**logAge_grid, metal_grid, alpha_grid, 1)
+
+            #for plotting output
+            if fixed != None:
+                pp.sol[0:4] = start
+            
+            #produce plots
+            tmp_plot1 = plot_ppxf_sfh(pp_step1,np.exp(logLam),i,outfigFile_step1,snrCubevar=snr_prefit,
+                                      snrResid=snr_Resid1)
+            # Remap goodPixels_preclip from full-range to science-range indices
+            sfh_start = idx_lam_sfh[0]
+            goodPixels_preclip_sfh = np.array([
+                p - sfh_start for p in goodPixels_preclip
+                if sfh_start <= p < sfh_start + len(logLam_sfh)
+            ])
+            tmp_plot3 = plot_ppxf_sfh(pp,np.exp(logLam_sfh),i,outfigFile_step3,snrCubevar=snr_prefit,snrResid=snr_postfit,\
+                             goodpixelsPre=goodPixels_preclip_sfh,mean_results=mean_results_step3)
+
+        # Currently only apply MC described by Pessa et al. 2023 (https://ui.adsabs.harvard.edu/abs/2023A%26A...673A.147P/abstract)
+        if nsims > 0:
+
+            w_row_MC = np.zeros((nsims, ncomb))
+
+            for o in range(0, nsims):
+                # Add noise to input spectrum "log_bin_data":
+                #   - MC iterated spectrum is created by a gaussian random sampling with the mean of galaxy spectrum "log_bin_data" and sigma of "noise_new"
+                #   - no regularization is applied for this step
+                log_bin_data_iter = np.random.normal(loc=log_bin_data_sfh_corr, scale=noise_new_sfh_corr)
+                mc_iter = ppxf(
+                    templates,
+                    log_bin_data_iter,
+                    noise_new_sfh_corr,
+                    velscale,
+                    start,
+                    mask=mask_sfh,
+                    plot=False,
+                    quiet=True,
+                    moments=nmoments,
+                    degree=-1,
+                    mdegree=0,
+                    regul = 0,
+                    fixed=fixed,
+                    lam=np.exp(logLam_sfh),
+                    lam_temp=np.exp(logLam_template),
+                    velscale_ratio=velscale_ratio,
+                    component=component_step3,
+                    dust=dust_step3,
+                )
+                weights_mc_iter   = mc_iter.weights.reshape(templates.shape[1:])/mc_iter.weights.sum()
+                w_row_MC[o, :]    = np.reshape(weights_mc_iter, ncomb)
+
+            # Calculate mean and error of weights and weighted properties from MC realizations
+            w_row_MC_mean         = np.nanmean(w_row_MC, axis=0)
+            w_row_MC_err          = (np.nanpercentile(w_row_MC, q=84, axis=0) - np.nanpercentile(w_row_MC, q=16, axis=0))/2
+            mean_results_MC_array = mean_agemetalalpha(w_row_MC, 10**logAge_grid, metal_grid, alpha_grid, nsims)
+            mean_results_MC_mean  = np.nanmean(mean_results_MC_array, axis=0)
+            mean_results_MC_err  = (np.nanpercentile(mean_results_MC_array, q=84, axis=0) - np.nanpercentile(mean_results_MC_array, q=16, axis=0))/2
+
+            mc_results = {
+                "w_row_MC_iter": w_row_MC,
+                "w_row_MC_mean": w_row_MC_mean,
+                "w_row_MC_err": w_row_MC_err,
+                "mean_results_MC_iter": mean_results_MC_array,
+                "mean_results_MC_mean":  mean_results_MC_mean,
+                "mean_results_MC_err":  mean_results_MC_err
+            }
+
+        else:
+            mc_results = {
+                "w_row_MC_iter": np.nan,
+                "w_row_MC_mean": np.nan,
+                "w_row_MC_err": np.nan,
+                "mean_results_MC_iter": np.nan,
+                "mean_results_MC_mean":  np.nan,
+                "mean_results_MC_err":  np.nan
+            }
+
+        # apply the dust vector to bestfit if keyword set:
+        #if config["SFH"]["DUST_CORR"] == True:
+        #    pp.bestfit = extinction.apply(extinction.calzetti00(np.exp(logLam), Av, Rv), pp.bestfit) * \
+        #                 median_log_bin_data_tmp
+        
+        # add normalisation factor back in main results
+        pp.bestfit = pp.bestfit * median_log_bin_data
+
+        # Save the full-range MPOLY evaluated at science-range pixels
+        mpoly = mpoly_full[idx_lam_sfh]
+
+        return(
+            pp.sol[:],
+            w_row,
+            pp.bestfit,
+            mc_results,
+            formal_error,
+            spectral_mask,
+            snr_postfit,
+            pp.chi2,
+            EBV,
+            mpoly,
+        )
+
+    #except:
+        # Handle any other type of exception
+        #print(f"An error occurred: {e}")
+    except Exception as e:
+        import traceback
+        logging.warning(f"run_ppxf failed for bin {i}: {e}")
+        logging.warning(traceback.format_exc())
+        mc_results_nan = {
+            "w_row_MC_iter": np.nan,
+                "w_row_MC_mean": np.nan,
+                "w_row_MC_err": np.nan,
+                "mean_results_MC_iter": np.nan,
+                "mean_results_MC_mean":  np.nan,
+                "mean_results_MC_err":  np.nan
+            }
+        return( np.nan, np.nan, np.nan, mc_results_nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
+
+
+def mean_agemetalalpha(w_row, ageGrid, metalGrid, alphaGrid, nbins):
+    """
+    Calculate the mean age, metallicity and alpha enhancement in each bin.
+    """
+    mean = np.zeros( (nbins,3) ); mean[:,:] = np.nan
+
+    for i in range( nbins ):
+        mean[i,0] = np.sum(w_row[i] * ageGrid.ravel())   / np.sum(w_row[i])
+        mean[i,1] = np.sum(w_row[i] * metalGrid.ravel()) / np.sum(w_row[i])
+        mean[i,2] = np.sum(w_row[i] * alphaGrid.ravel()) / np.sum(w_row[i])
+
+    return(mean)
+
+
+def save_sfh(
+    config,
+    ppxf_result,
+    formal_error,
+    ppxf_bestfit,
+    logLam,
+    goodPixels,
+    logLam_template,
+    npix,
+    spectral_mask,
+    bin_data,
+    snr_postfit,
+    red_chi2,
+    EBV,
+    mpoly,
+    mean_result,
+    mean_result_MC_mean,
+    mean_result_MC_err,
+    w_row,
+    w_row_MC_iter,
+    logAge_grid,
+    metal_grid,
+    alpha_grid,
+    velscale,
+    logLam1,
+    ncomb,
+    nAges,
+    nMetal,
+    nAlpha,
+):
+    """ Save all results to disk. """
+
+    # Define the output file
+    outfits_sfh = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_sfh.fits"
+    printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh.fits")
+
+    # Table HDU with stellar kinematics
+    # Define the initial columns
+    columns = [
+        fits.Column(name="AGE", format="D", array=mean_result[:, 0]),  # Age column
+        fits.Column(name="METAL", format="D", array=mean_result[:, 1]),  # Metallicity column
+        fits.Column(name="ALPHA", format="D", array=mean_result[:, 2])  # Alpha column
+    ]
+
+    # If MC_PPXF is enabled, add additional columns
+    if config["SFH"]["MC_PPXF"] > 0:
+        # Define MC columns (mean values)
+        mc_columns = [
+            fits.Column(name=f"{name}_MC", format="D", array=mean_result_MC_mean[:,i])
+            for i, name in enumerate(["AGE", "METAL", "ALPHA"])  # Loop over AGE, METAL, and ALPHA
+        ]
+        # Define MC error columns
+        err_columns = [
+            fits.Column(name=f"ERR_{name}_MC", format="D", array=mean_result_MC_err[:,i])
+            for i, name in enumerate(["AGE", "METAL", "ALPHA"])  # Loop over AGE, METAL, and ALPHA
+        ]
+        # Add MC columns and error columns to the main list
+        columns.extend(mc_columns + err_columns)
+
+    # If FIXED is False, add kinematic columns
+    if config["SFH"]["FIXED"] == False:
+        # Define kinematic columns (V and SIGMA)
+        kinematic_columns = [
+            fits.Column(name=name, format="D", array=ppxf_result[:, i])
+            for i, name in enumerate(["V", "SIGMA"])  # Loop over V and SIGMA
+        ]
+        # Add kinematic columns to the main list
+        columns.extend(kinematic_columns)
+
+        # Add higher-order kinematic columns (H3, H4, H5, H6) if they exist
+        for i, name in enumerate(["H3", "H4", "H5", "H6"]):
+            if np.any(ppxf_result[:, i+2]) != 0:  # Check if the column exists
+                columns.append(fits.Column(name=name, format="D", array=ppxf_result[:, i+2]))
+
+        # Define formal error columns for kinematic parameters
+        error_columns = [
+            fits.Column(name=f"FORM_ERR_{name}", format="D", array=formal_error[:, i])
+            for i, name in enumerate(["V", "SIGMA"])  # Loop over V and SIGMA
+        ]
+        # Add formal error columns to the main list
+        columns.extend(error_columns)
+
+        # Add formal error columns for higher-order kinematic parameters
+        for i, name in enumerate(["H3", "H4", "H5", "H6"]):
+            if np.any(formal_error[:, i+2]) != 0:  # Check if the column exists
+                columns.append(fits.Column(name=f"FORM_ERR_{name}", format="D", array=formal_error[:, i+2]))
+
+    # Add SNR_POSTFIT column to the main list
+    columns.append(fits.Column(name="SNR_POSTFIT", format="D", array=snr_postfit[:]))
+
+    # Add Chi2 column to the main list
+    columns.append(fits.Column(name="RED_CHI2", format="D", array=red_chi2[:]))
+
+    # Add E(B-V) derived from pPXF 0th step with reddening but no polynomials
+    columns.append(fits.Column(name="EBV", format="D", array=EBV[:]))
+    
+    # Create the HDUs
+    priHDU = fits.PrimaryHDU()
+    dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(columns), name="SFH")
+
+    # Save the configuration to the headers
+    priHDU = _auxiliary.saveConfigToHeader(priHDU, config["SFH"])
+    dataHDU = _auxiliary.saveConfigToHeader(dataHDU, config["SFH"])
+
+    # Create HDU list and write to file
+    HDUList = fits.HDUList([priHDU, dataHDU])
+    HDUList.writeto(outfits_sfh, overwrite=True)
+
+    printStatus.updateDone("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh.fits")
+    logging.info("Wrote: " + outfits_sfh)
+
+    # ========================
+    # SAVE WEIGHTS AND GRID
+    # Define the output file
+    outfits_sfh = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_sfh_weights.fits"
+    printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh_weights.fits")
+
+    # Primary HDU
+    priHDU = fits.PrimaryHDU()
+
+    # Table HDU with weights
+    cols_weights = [fits.Column(name="WEIGHTS", format=str(w_row.shape[1]) + "D", array=w_row)]
+    dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols_weights), name="WEIGHTS")
+
+    # Reshape the grids
+    logAge_row, metal_row, alpha_row = map(np.reshape, [logAge_grid, metal_grid, alpha_grid], [ncomb]*3)
+
+    # Table HDU with grids
+    cols_grid = [fits.Column(name=name, format="D", array=array) 
+                 for name, array in zip(["LOGAGE", "METAL", "ALPHA"], [logAge_row, metal_row, alpha_row])]
+    gridHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols_grid), name="GRID")
+
+    # Create HDU list and write to file
+    HDUList = fits.HDUList([_auxiliary.saveConfigToHeader(hdu, config["SFH"]) for hdu in [priHDU, dataHDU, gridHDU]])
+    HDUList.writeto(outfits_sfh, overwrite=True)
+
+    # Set additional header values
+    for name, value in zip(["NAGES", "NMETAL", "NALPHA"], [nAges, nMetal, nAlpha]):
+        fits.setval(outfits_sfh, name, value=value)
+
+    printStatus.updateDone(
+        "Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh_weights.fits"
+    )
+    logging.info("Wrote: " + outfits_sfh)
+    # ========================
+    # SAVE MC RESULTS OF WEIGHTS AND GRID
+    if config["SFH"]["MC_PPXF"] > 0:
+
+        outfits_sfh = (
+            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
+            + "_sfh-weights_mc.fits"
+        )
+        printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh_weights_mc.fits")
+
+        # Primary HDU
+        priHDU = fits.PrimaryHDU()
+
+        # Table HDU with weights from MC results
+        dataHDU_list = []
+        for iter_i in range(config["SFH"]["MC_PPXF"]):
+            cols = [fits.Column(name="WEIGHTS_MC", format=str(w_row_MC_iter.shape[2]) + "D", array=w_row_MC_iter[:, iter_i, :])]
+            dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+            dataHDU.name = "MC_ITER_%s" % iter_i
+            dataHDU_list.append(dataHDU)
+
+        # Create HDU list and write to file
+        priHDU = _auxiliary.saveConfigToHeader(priHDU, config["SFH"])
+        HDUList = fits.HDUList([priHDU] + dataHDU_list)
+        HDUList.writeto(outfits_sfh, overwrite=True)
+
+        fits.setval(outfits_sfh, "NAGES", value=nAges)
+        fits.setval(outfits_sfh, "NMETAL", value=nMetal)
+        fits.setval(outfits_sfh, "NALPHA", value=nAlpha)
+
+        printStatus.updateDone(
+            "Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh_weights_mc.fits"
+        )
+        logging.info("Wrote: " + outfits_sfh)
+
+    # ========================
+    # SAVE BESTFIT
+    outfits_sfh = (
+        os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
+        + "_sfh_bestfit.fits"
+    )
+    printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh_bestfit.fits")
+
+    # Primary HDU
+    priHDU = fits.PrimaryHDU()
+
+    # Table HDU with SFH bestfit
+    cols = []
+    cols.append( fits.Column(name='BESTFIT', format=str(npix)+'D', array=ppxf_bestfit ))
+    dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    dataHDU.name = "BESTFIT"
+
+    # Table HDU with SFH logLam
+    cols = []
+    cols.append( fits.Column(name='LOGLAM', format='D', array=logLam ))
+    logLamHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    logLamHDU.name = "LOGLAM"
+
+    # Table HDU with template wavelength grid
+    cols = []
+    cols.append(fits.Column(name="LOGLAM_TEMPLATE", format="D", array=logLam_template))
+    logLamTempHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    logLamTempHDU.name = "LOGLAM_TEMPLATE"
+
+    # Table HDU with observed spectra
+    cols = []
+    cols.append(fits.Column(name="SPEC", format=str(npix) + "D", array=bin_data.T))
+    specHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    specHDU.name = "SPEC"
+
+    # Table HDU with SFH goodpixels
+    cols = []
+    cols.append(fits.Column(name="GOODPIX", format="J", array=goodPixels))
+    goodpixHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    goodpixHDU.name = "GOODPIX"
+
+    # Table HDU with 3 sigma clipped regions
+    cols = []
+    cols.append(fits.Column(name="GOODPIX_CLN", format=str(spectral_mask.shape[1]) + "D", array=spectral_mask))
+    goodpixClnHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    goodpixClnHDU.name = "GOODPIX_CLN"
+
+    # Table HDU with multiplicative Legendre polynomials
+    cols = []
+    cols.append(fits.Column(name="MPOLY", format=str(mpoly.shape[1]) + "D", array=mpoly))
+    mpolyHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    mpolyHDU.name = "MPOLY"
+
+    # Create HDU list and write to file
+    priHDU = _auxiliary.saveConfigToHeader(priHDU, config["SFH"])
+    dataHDU = _auxiliary.saveConfigToHeader(dataHDU, config["SFH"])
+    logLamHDU = _auxiliary.saveConfigToHeader(logLamHDU, config["SFH"])
+    logLamTempHDU = _auxiliary.saveConfigToHeader(logLamTempHDU, config["SFH"])
+    specHDU = _auxiliary.saveConfigToHeader(specHDU, config["SFH"])
+    goodpixHDU = _auxiliary.saveConfigToHeader(goodpixHDU, config["SFH"])
+    goodpixClnHDU = _auxiliary.saveConfigToHeader(goodpixClnHDU, config["SFH"])
+    mpolyHDU = _auxiliary.saveConfigToHeader(mpolyHDU, config["SFH"])
+    HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU, logLamTempHDU, specHDU, goodpixHDU, goodpixClnHDU, mpolyHDU])
+    HDUList.writeto(outfits_sfh, overwrite=True)
+
+    fits.setval(outfits_sfh, "VELSCALE", value=velscale)
+    fits.setval(outfits_sfh, "CRPIX1", value=1.0)
+    fits.setval(outfits_sfh, "CRVAL1", value=logLam1[0])
+    fits.setval(outfits_sfh, "CDELT1", value=logLam1[1] - logLam1[0])
+
+    printStatus.updateDone(
+        "Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh_bestfit.fits"
+    )
+    logging.info("Wrote: " + outfits_sfh)
+
+
+
+
+def extractStarFormationHistories(config):
+    """
+    Starts the computation of non-parametric star-formation histories with
+    pPXF.  A spectral template library sorted in a three-dimensional grid of
+    age, metallicity, and alpha-enhancement is loaded.  Emission-subtracted
+    spectra are used for the fit. An according emission-line mask is
+    constructed. The stellar kinematics can or cannot be fixed to those obtained
+    with a run of unregularized pPXF and the analysis started.  Results are
+    saved to disk and the plotting routines called.
+    Args:
+    - config: dictionary containing configuration parameters
+    """
+
+    # Read LSF information
+    LSF_Data, LSF_Templates = _auxiliary.getLSF(config, "SFH")
+
+    # Prepare template library
+    # Open the HDF5 file
+    with h5py.File(os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_bin_spectra.hdf5", 'r') as f:
+        # Read the VELSCALE attribute from the file
+        velscale = f.attrs["VELSCALE"]
+        
+    velscale_ratio = 2
+
+    (
+        templates,
+        lamRange_temp,
+        logLam_template,
+        ntemplates,
+        logAge_grid,
+        metal_grid,
+        alpha_grid,
+        ncomb,
+        nAges,
+        nMetal,
+        nAlpha,
+    ) = _prepareTemplates.prepareTemplates_Module(
+        config,
+        config["READ_DATA"]["LMIN_TOT"],
+        config["READ_DATA"]["LMAX_TOT"],
+        velscale/velscale_ratio,
+        LSF_Data,
+        LSF_Templates,
+        'SFH',
+        sortInGrid=True,
+    )
+
+    # check that template wavelength is larger than requested fit range otherwise stop
+    if (lamRange_temp[0] >= config["READ_DATA"]["LMIN_TOT"]) or (lamRange_temp[1] <= config["READ_DATA"]["LMAX_TOT"]):
+        logging.info("Template wavelength range needs to be larger than fitting range, exiting")
+        printStatus.warning(
+            "Template wavelength range needs to be larger than fitting range, exiting"
+        )
+        return
+
+    # Define file paths
+    gas_cleaned_file = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + '_gas_cleaned_'+config["GAS"]["LEVEL"].lower()+'.fits'
+    bin_spectra_file = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_bin_spectra.hdf5"
+
+    # Check if emission-subtracted spectra file exists
+    if (config["SFH"]["SPEC_EMICLEAN"] == True) and os.path.isfile(gas_cleaned_file):
+        logging.info(f"Using emission-subtracted spectra at {gas_cleaned_file}")
+        printStatus.done("Using emission-subtracted spectra")
+        # Open the FITS file
+        with fits.open(gas_cleaned_file, mem_map=True) as hdul:
+            # Read the LOGLAM data from the file
+            logLam = hdul[2].data["LOGLAM"]
+
+            # Select the indices where the wavelength is within the specified range
+            idx_lam = np.where(np.logical_and(np.exp(logLam) > config["READ_DATA"]["LMIN_TOT"], np.exp(logLam) < config["READ_DATA"]["LMAX_TOT"]))[0]
+
+            # Read the SPEC and ESPEC data from the file, only for the selected indices
+            bin_data = hdul[1].data["SPEC"].T[idx_lam, :]
+            bin_err = hdul[1].data["ESPEC"].T[idx_lam, :]
+            logLam = logLam[idx_lam]
+            nbins = bin_data.shape[1]
+            npix = bin_data.shape[0]
+    else:
+        logging.info(f"Using regular spectra without any emission-correction at {bin_spectra_file}")
+        printStatus.done("Using regular spectra without any emission-correction")
+        with h5py.File(bin_spectra_file, 'r') as f:
+            # Read the LOGLAM data from the file
+            logLam = f["LOGLAM"][:]
+
+            # Select the indices where the wavelength is within the specified range
+            idx_lam = np.where(np.logical_and(np.exp(logLam) > config["READ_DATA"]["LMIN_TOT"], np.exp(logLam) < config["READ_DATA"]["LMAX_TOT"]))[0]
+
+            # Read the SPEC and ESPEC data from the file, only for the selected indices
+            bin_data = f["SPEC"][idx_lam, :]
+            bin_err = f["ESPEC"][idx_lam, :]
+            logLam = logLam[idx_lam]
+
+    # Save full-range dimensions and define science-range crop indices
+    npix_full = bin_data.shape[0]
+    logLam_full = logLam.copy()
+    idx_lam_sfh = np.where(np.logical_and(
+        np.exp(logLam_full) >= config["SFH"]["LMIN"],
+        np.exp(logLam_full) <= config["SFH"]["LMAX"]
+    ))[0]
+    npix_sfh = len(idx_lam_sfh)
+
+    # Define additional variables
+    nbins = bin_data.shape[1]
+    npix = bin_data.shape[0]
+    ubins = np.arange(nbins)
+    dv = (np.log(lamRange_temp[0]) - logLam[0])*C
+
+
+    # Last preparatory steps
+    offset = (logLam_template[0] - logLam[0])*C
+    
+    #check what type of noise should be passed on:
+    if config["SFH"]["NOISE"] == 'variance': # use noise from cube 
+        noise = bin_err  # already converted to noise, i.e. sqrt(variance)
+    elif config["SFH"]["NOISE"] == 'constant': # use constant noise
+        noise  = np.ones((npix,nbins))
+        # while constant, the noise does need to be scaled to match the bin_err
+        med_bin_err = np.nanmedian(bin_err, axis=0)
+        noise *= med_bin_err        
+
+    nsims = config["SFH"]["MC_PPXF"]
+
+    # Implementation of switch FIXED
+    # Do fix kinematics to those obtained previously
+    if config["SFH"]["FIXED"] == True:
+        logging.info("Stellar kinematics are FIXED to the results obtained before.")
+        #check if moments KIN == SFH
+        if config["SFH"]["MOM"] != config["KIN"]["MOM"]:
+            printStatus.running("Moments not the same in KIN and SFH module")
+            printStatus.running("Ignoring SFH MOMENTS, using KIN MOMENTS")
+        # Set fixed option to True
+        fixed = [True] * config["KIN"]["MOM"]
+
+        # Read PPXF results
+        ppxf_data = fits.open(
+            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
+            + "_kin.fits", mem_map=True
+        )[1].data
+        start = np.zeros((nbins, config["KIN"]["MOM"]))
+        for i in range(nbins):
+            start[i, :] = np.array(ppxf_data[i][: config["KIN"]["MOM"]])
+
+    # Do *NOT* fix kinematics to those obtained previously
+    elif config["SFH"]["FIXED"] == False:
+        logging.info(
+            "Stellar kinematics are NOT FIXED to the results obtained before but extracted simultaneously with the stellar population properties."
+        )
+        # Set fixed option to False and use initial guess from Config-file
+        fixed = None
+        start = np.zeros((nbins, config["SFH"]["MOM"]))
+        for i in range(nbins):
+            if config["SFH"]["MOM"] == 2:
+                start[i, :] = np.array([0.0, config["KIN"]["SIGMA"]])
+            elif config["SFH"]["MOM"] == 4:
+                start[i, :] = np.array([0.0, config["KIN"]["SIGMA"],0.0,0.0])
+            elif config["SFH"]["MOM"] == 6:
+                start[i, :] = np.array([0.0, config["KIN"]["SIGMA"],0.0,0.0,0.0,0.0])
+
+    # Define goodpixels
+    #check if a premask for step zero has been defined
+    if 'SPEC_PREMASK' in config["SFH"]:
+        #yes, load this premask file
+        goodPixels_step0_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_PREMASK"], logLam)
+    else:
+        #no, load this normal file
+        goodPixels_step0_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam)
+    
+    goodPixels_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam)
+    goodPixels_sfh_cropped = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam_full[idx_lam_sfh])    
+
+    # Check if plot keyword is set:
+    doplot = config["SFH"].get("PLOT", False)
+
+    # define the regularisation value 
+    sfh_cfg = config["SFH"]
+    if "REGUL" in sfh_cfg:
+        regul = sfh_cfg["REGUL"]
+    elif "REGUL_ERR" in sfh_cfg:
+        regul_err = sfh_cfg["REGUL_ERR"]
+        regul = 0.0 if regul_err == 0 else 1.0 / regul_err
+    else:
+        raise KeyError("Either SFH.REGUL or SFH.REGUL_ERR must be set")
+
+    # Define output arrays
+    ppxf_result = np.zeros((nbins,6    ))
+    w_row = np.zeros((nbins,ncomb))
+    ppxf_bestfit = np.zeros((nbins, npix_sfh))
+    formal_error = np.zeros((nbins,6))
+    spectral_mask = np.zeros((nbins, npix_sfh))
+    snr_postfit = np.zeros(nbins)
+    red_chi2 = np.zeros(nbins)
+    EBV = np.zeros(nbins)
+    mpoly = np.zeros((nbins, npix_sfh))
+
+    # Define output arrays of MC realizations
+    if nsims > 0:
+        logging.info('MC realizations will be applied with %s iterations to estimate weights uncertainties.' % nsims)
+    w_row_MC_iter        = np.zeros((nbins,nsims,ncomb))
+    w_row_MC_mean        = np.zeros((nbins,ncomb))
+    w_row_MC_err         = np.zeros((nbins,ncomb))
+    mean_results_MC_iter = np.zeros((nbins,nsims,3))
+    mean_results_MC_mean = np.zeros((nbins,3))
+    mean_results_MC_err  = np.zeros((nbins,3))
+
+    # ====================
+    # If OPT_TEMP keyword set to 'galaxy_single' or 'galaxy_set' then
+    # run PPXF once on combined mean spectrum to get a single or optimal template set
+
+    if (config["SFH"]["OPT_TEMP"] == "galaxy_single") or (config["SFH"]["OPT_TEMP"] == "galaxy_set"):
+        comb_spec = np.nanmean(bin_data[:,:],axis=1)
+        comb_espec = np.nanmean(bin_err[:,:],axis=1)
+
+        optimal_template_out, optimal_template_set = run_ppxf_firsttime(
+            templates,
+            comb_spec ,
+            comb_espec,
+            velscale,
+            start[0,:],
+            goodPixels_step0_sfh,
+            config["SFH"]["MOM"],
+            offset,
+            -1,
+            config["SFH"]["MDEG"],
+            regul,
+            velscale_ratio,
+            ncomb,
+        )
+
+        # now define the optimal template that we'll use throughout
+        if config["SFH"]["OPT_TEMP"] == 'galaxy_single':
+            optimal_template_comb = optimal_template_out # single template
+        if config["SFH"]["OPT_TEMP"] == 'galaxy_set':
+            optimal_template_comb = optimal_template_set # selected set  from total galaxy fit
+    else:
+        optimal_template_comb = templates # all templates
+ 
+    # ====================
+    EBV_init = 0.1 # PHANGS value initial guess
+
+    # ====================
+    # Run PPXF
+    start_time = time.time()
+
+    if config["GENERAL"]["PARALLEL"] == True:
+        printStatus.running("Running pPXF in parallel mode")
+        logging.info("Running pPXF in parallel mode")
+
+        # Prepare the folder where the memmap will be dumped
+        memmap_folder = "/scratch" if os.access("/scratch", os.W_OK) else config["GENERAL"]["OUTPUT"]
+
+        # dump the arrays and load as memmap
+        templates_filename_memmap = memmap_folder + "/templates_memmap.tmp"
+        dump(templates, templates_filename_memmap)
+        templates = load(templates_filename_memmap, mmap_mode='r')
+        
+        bin_data_filename_memmap = memmap_folder + "/bin_data_memmap.tmp"
+        dump(bin_data, bin_data_filename_memmap)
+        bin_data = load(bin_data_filename_memmap, mmap_mode='r')
+        
+        noise_filename_memmap = memmap_folder + "/noise_memmap.tmp"
+        dump(noise, noise_filename_memmap)
+        noise = load(noise_filename_memmap, mmap_mode='r')
+
+        # Define a function to encapsulate the work done in the loop
+        def worker(chunk, templates):
+            results = []
+            for i in chunk:
+                result = run_ppxf(
+                    templates,
+                    bin_data[:,i],
+                    noise[:,i],
+                    velscale,
+                    start[i,:],
+                    goodPixels_step0_sfh,
+                    goodPixels_sfh,
+                    config["SFH"]["MOM"],
+                    offset,
+                    -1,
+                    config["SFH"]["MDEG"],
+                    regul,
+                    config["SFH"]["DOCLEAN"],
+                    fixed,
+                    velscale_ratio,
+                    npix,
+                    ncomb,
+                    nbins,
+                    i,
+                    optimal_template_comb,
+                    EBV_init,
+                    logLam,
+                    config["SFH"]["MC_PPXF"],
+                    idx_lam_sfh,
+                    logLam_full,
+                    logLam_template,
+                    logAge_grid,
+                    metal_grid,
+                    alpha_grid,
+                    config,
+                    doplot,
+                )
+                results.append(result)
+            return results
+
+        # Use joblib to parallelize the work
+        max_nbytes = "1M" # max array size before memory mapping is triggered
+        chunk_size = max(1, nbins // (config["GENERAL"]["NCPU"] * 10))
+        chunks = [range(i, min(i + chunk_size, nbins)) for i in range(0, nbins, chunk_size)]
+        parallel_configs = {"n_jobs": config["GENERAL"]["NCPU"], "max_nbytes": max_nbytes, "temp_folder": memmap_folder, "mmap_mode": "c", "return_as":"generator"}
+        ppxf_tmp = list(tqdm(Parallel(**parallel_configs)(delayed(worker)(chunk, templates) for chunk in chunks),
+                        total=len(chunks), desc="Processing chunks", ascii=" #", unit="chunk"))
+
+        # Flatten the results
+        ppxf_tmp = [result for chunk_results in ppxf_tmp for result in chunk_results]
+
+        # Unpack results
+        for i in range(0, nbins):
+            ppxf_result[i,:config["SFH"]["MOM"]] = ppxf_tmp[i][0]
+            w_row[i,:] = ppxf_tmp[i][1]
+            ppxf_bestfit[i,:] = ppxf_tmp[i][2]
+            w_row_MC_iter[i,:,:] = ppxf_tmp[i][3]["w_row_MC_iter"]
+            w_row_MC_mean[i,:] = ppxf_tmp[i][3]["w_row_MC_mean"]
+            w_row_MC_err[i,:] = ppxf_tmp[i][3]["w_row_MC_err"]
+            mean_results_MC_iter[i,:,:] = ppxf_tmp[i][3]["mean_results_MC_iter"]
+            mean_results_MC_mean[i,:]  = ppxf_tmp[i][3]["mean_results_MC_mean"]
+            mean_results_MC_err[i,:]  = ppxf_tmp[i][3]["mean_results_MC_err"]
+            formal_error[i,:config["SFH"]["MOM"]] = ppxf_tmp[i][4]
+            spectral_mask[i,:] = ppxf_tmp[i][5]
+            snr_postfit[i] = ppxf_tmp[i][6]
+            red_chi2[i] = ppxf_tmp[i][7]
+            EBV[i] = ppxf_tmp[i][8]
+            mpoly[i,:] = ppxf_tmp[i][9]
+
+        # Remove the memory-mapped files
+        os.remove(templates_filename_memmap)
+        os.remove(bin_data_filename_memmap)
+        os.remove(noise_filename_memmap)
+        
+        printStatus.updateDone("Running PPXF in parallel mode", progressbar=False)
+        
+
+    if config["GENERAL"]["PARALLEL"] == False:
+        printStatus.running("Running PPXF in serial mode")
+        logging.info("Running PPXF in serial mode")
+
+        # check if we need to run all bins or only a subset
+        if 'DEBUG_BIN' in config["SFH"]:
+            runbin = config["SFH"]["DEBUG_BIN"]
+            printStatus.running("Running PPXF in Debug mode on bins: "+str(runbin))
+        else:
+            runbin = np.arange(0, nbins)
+
+        for i in runbin:
+            (
+                ppxf_result[i,:config["SFH"]["MOM"]],
+                w_row[i,:],
+                ppxf_bestfit[i,:],
+                mc_results_i,
+                formal_error[i,:config["SFH"]["MOM"]],
+                spectral_mask[i,:],
+                snr_postfit[i],
+                red_chi2[i],
+                EBV[i],
+                mpoly[i,:],
+            ) = run_ppxf(
+                templates,
+                bin_data[:,i],
+                noise[:,i],
+                velscale,
+                start[i,:],
+                goodPixels_step0_sfh,
+                goodPixels_sfh,
+                config["SFH"]["MOM"],
+                offset,
+                -1,
+                config["SFH"]["MDEG"],
+                regul,
+                config["SFH"]["DOCLEAN"],
+                fixed,
+                velscale_ratio,
+                npix,
+                ncomb,
+                nbins,
+                i,
+                optimal_template_comb,
+                EBV_init,
+                logLam,
+                config["SFH"]["MC_PPXF"],
+                idx_lam_sfh,
+                logLam_full,
+                logLam_template,
+                logAge_grid,
+                metal_grid,
+                alpha_grid,
+                config,
+                doplot,
+            )
+            w_row_MC_iter[i,:,:] = mc_results_i["w_row_MC_iter"]
+            w_row_MC_mean[i,:] = mc_results_i["w_row_MC_mean"]
+            w_row_MC_err[i,:] = mc_results_i["w_row_MC_err"]
+            mean_results_MC_iter[i,:,:] = mc_results_i["mean_results_MC_iter"]
+            mean_results_MC_mean[i,:] = mc_results_i["mean_results_MC_mean"]
+            mean_results_MC_err[i,:] = mc_results_i["mean_results_MC_err"]
+        printStatus.updateDone("Running PPXF in serial mode", progressbar=False)
+
+    print(
+        "             Running PPXF on %s spectra took %.2fs using %i cores"
+        % (nbins, time.time() - start_time, config["GENERAL"]["NCPU"])
+    )
+    logging.info(
+        "Running PPXF on %s spectra took %.2fs using %i cores"
+        % (nbins, time.time() - start_time, config["GENERAL"]["NCPU"])
+    )
+
+    # Check for exceptions which occurred during the analysis
+    idx_error = np.where( np.isnan( ppxf_result[:,0] ) == True )[0]
+
+    if len(idx_error) != 0:
+        printStatus.warning(
+            "There was a problem in the analysis of the spectra with the following BINID's: "
+        )
+        print("             " + str(idx_error))
+        logging.warning(
+            "There was a problem in the analysis of the spectra with the following BINID's: "
+            + str(idx_error)
+        )
+    else:
+        print("             " + "There were no problems in the analysis.")
+        logging.info("There were no problems in the analysis.")
+    print("")
+
+    # Calculate mean age, metallicity and alpha
+    mean_results = mean_agemetalalpha(
+        w_row, 10**logAge_grid, metal_grid, alpha_grid, nbins
+    )
+
+    # Save to file
+    if 'DEBUG_BIN' in config["SFH"]:
+        config["SFH"]["DEBUG_BIN"] = str(config["SFH"]["DEBUG_BIN"])
+
+    save_sfh(
+        config,
+        ppxf_result,
+        formal_error,
+        ppxf_bestfit,
+        logLam_full[idx_lam_sfh],
+        goodPixels_sfh_cropped,
+        logLam_template,
+        npix_sfh,
+        spectral_mask,
+        bin_data[idx_lam_sfh, :],
+        snr_postfit,
+        red_chi2,
+        EBV,
+        mpoly,
+        mean_results,
+        mean_results_MC_mean,
+        mean_results_MC_err,
+        w_row,
+        w_row_MC_iter,
+        logAge_grid,
+        metal_grid,
+        alpha_grid,
+        velscale,
+        logLam_full[idx_lam_sfh],
+        ncomb,
+        nAges,
+        nMetal,
+        nAlpha,
+    )
+
+    # Return
+    return None
