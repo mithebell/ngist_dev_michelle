@@ -257,7 +257,6 @@ def save_ppxf_emlines(
     # ========================
     # SAVE RESULTS
     outfits_ppxf = rootname + "/" + outdir + "_gas_" + level.lower() + ".fits"
-    printStatus.running("Writing: " + outfits_ppxf.split("/")[-1])
     printStatus.running(
         "Writing: " + config["GENERAL"]["RUN_ID"] + "_gas_" + level.lower() + ".fits"
     )
@@ -411,7 +410,9 @@ def save_ppxf_emlines(
     HDUList = fits.HDUList([priHDU, dataHDU])
     HDUList.writeto(outfits_ppxf, overwrite=True)
 
-    printStatus.running("Writing: " + outfits_ppxf.split("/")[-1])
+    printStatus.updateDone(
+        "Writing: " + config["GENERAL"]["RUN_ID"] + "_gas_" + level.lower() + ".fits"
+    )
     logging.info("Wrote: " + outfits_ppxf)
 
     # ========================
@@ -992,7 +993,15 @@ def performEmissionLineAnalysis(config):  # This is your main emission line fitt
     elif config["GENERAL"]["PARALLEL"] == False:
         printStatus.running("Running PPXF in serial mode")
         logging.info("Running PPXF in serial mode")
-        for i in range(0, np.max(ubins) + 1):
+
+        if 'DEBUG_BIN' in config["GAS"] and config["GAS"]["DEBUG_BIN"] is not False:
+            runbin = config["GAS"]["DEBUG_BIN"]
+            printStatus.running("Running PPXF in debug mode on bins: " + str(runbin))
+            logging.info("Running PPXF in debug mode on bins: " + str(runbin))
+        else:
+            runbin = range(0, np.max(ubins) + 1)
+
+        for i in runbin:
             # start[0]=stellar_kinematics[i, :]
             start[0] = start[i]  # Added this in. Check if ok.
 
@@ -1094,6 +1103,8 @@ def performEmissionLineAnalysis(config):  # This is your main emission line fitt
     sigma_final_measured = (sigma_final**2 + templates_sigma**2) ** (0.5)
 
     # save results to file
+    if 'DEBUG_BIN' in config["GAS"] and config["GAS"]["DEBUG_BIN"] is not False:
+        config["GAS"]["DEBUG_BIN"] = str(config["GAS"]["DEBUG_BIN"])
 
     save_ppxf_emlines(
         config,
