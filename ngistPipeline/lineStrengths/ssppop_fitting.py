@@ -1,13 +1,15 @@
 #!/usr/bin/env python
+import logging
 import optparse
 import os
 import sys
 import warnings
 
+import corner
 import emcee
-# from   joblib              import Parallel, delayed
+from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
-# import h5py
+import h5py
 import numpy
 import scipy.spatial.qhull as qhull
 from astropy.io import fits
@@ -16,9 +18,17 @@ from astropy.io import fits
 # ===============================================================================
 #
 # RUN_SSPPOP_FITTING
-# This function runs a specific case in the configuration file
+# Fits line strength indices to SSP model grids using MCMC.
 #
-# Jesus Falcon-Barroso, IAC, June 2016
+# Key updates from original (Falcon-Barroso, IAC, June 2016):
+#   - Auto-detects single-alpha model files and fits in 2D (age, metallicity)
+#     rather than 3D
+#   - Supports minimisation-based walker initialisation via p0_centre
+#   - NaN-safe chi2 and likelihood computation
+#   - Improved MCMC chain and corner plots (Michelle Ding, Jan 2026)
+#
+# Jesus Falcon-Barroso, IAC, June 2016 (original)
+# Updated by Michelle Ding, Jan 2026
 # ===============================================================================
 def load_data(datafile, index_names):
     ## Loading the FITS table with observed values
@@ -72,12 +82,24 @@ def load_models(modelfile, index_names):
         model_indices[:, i] = tmp
 
     ## Creating the triangulation array
-    params = numpy.empty((nmodels, 3))
-    params[:, 0] = model.field("AGE")
-    params[:, 1] = model.field("MET")
-    params[:, 2] = model.field("ALPHA")
+    alpha_vals = model.field("ALPHA")
+    n_unique_alpha = len(numpy.unique(alpha_vals))
+    single_alpha = (n_unique_alpha == 1)
+
+    if single_alpha:
+        params = numpy.empty((nmodels, 2))
+        params[:, 0] = model.field("AGE")
+        params[:, 1] = model.field("MET")
+        labels = ["AGE", "METAL"]
+        logging.info(f"Single alpha value detected ({alpha_vals[0]:.3f}) — fitting in 2D (age, metallicity)")
+    else:
+        params = numpy.empty((nmodels, 3))
+        params[:, 0] = model.field("AGE")
+        params[:, 1] = model.field("MET")
+        params[:, 2] = alpha_vals
+        labels = ["AGE", "METAL", "ALPHA"]
+
     tri = qhull.Delaunay(params, qhull_options="QJ")
-    labels = ["AGE", "METAL", "ALPHA"]
 
     return model_indices, params, tri, labels
 
@@ -139,29 +161,22 @@ def interpolate(values, vtx, wts):
 
 # ==============================================================================
 def lnprior(par, model_pars):
-    # par = [Age, Met, Alpha] in no particular order
-    if (
-        # Rejecting solutions outside some boundary limits
-        (par[0] >= numpy.amin(model_pars[:, 0]))
-        and (par[0] <= numpy.amax(model_pars[:, 0]))
-        and (par[1] >= numpy.amin(model_pars[:, 1]))
-        and (par[1] <= numpy.amax(model_pars[:, 1]))
-        and (par[2] >= numpy.amin(model_pars[:, 2]))
-        and (par[2] <= numpy.amax(model_pars[:, 2]))
-    ):
-        return 0.0
-
-    return -numpy.inf
-
+    ndim = model_pars.shape[1]
+    for k in range(ndim):
+        if not (numpy.amin(model_pars[:, k]) <= par[k] <= numpy.amax(model_pars[:, k])):
+            return -numpy.inf
+    return 0.0
 
 # ==============================================================================
 def compute_indices(par, data, model_indices, params, tri):
     input_pt = numpy.array(par, ndmin=2)
+    simplex = tri.find_simplex(input_pt)
+    if simplex[0] == -1:
+        return numpy.full(len(data), numpy.nan)
     vtx, wts = interp_weights(params, input_pt, tri)
     outindices = numpy.zeros(len(data))
     for i in range(len(model_indices[0, :])):
         outindices[i] = interpolate(model_indices[:, i], vtx, wts)
-
     return outindices
 
 
@@ -175,19 +190,19 @@ def lnprob(par, data, error, model_indices, params, tri):
     # Interpolating the model grid indices at desired point
     out_indices = compute_indices(par, data, model_indices, params, tri)
 
-    # Computing the likelyhood for a given set of params
-    bad = error <= 0.0
-    if numpy.any(bad):
-        error = error * 0.0 + 1e10
-    inv_sigma2 = 1.0 / (error**2)
-    lnlike = -0.5 * numpy.sum(
-        (data - out_indices) ** 2 * inv_sigma2 - numpy.log(inv_sigma2)
-    )
-
-    # Safety check. If lnlike is not finite then return -numpy.inf
-    if not numpy.isfinite(lnlike):
+    if numpy.any(numpy.isnan(out_indices)):
         return -numpy.inf
 
+    good = (error > 0) & numpy.isfinite(error) & numpy.isfinite(data)
+
+    if numpy.sum(good) == 0:
+        return -numpy.inf
+
+    inv_sigma2 = 1.0 / (error[good] ** 2)
+    lnlike = -0.5 * numpy.sum((data[good] - out_indices[good]) ** 2 * inv_sigma2 - numpy.log(inv_sigma2))
+
+    if not numpy.isfinite(lnlike):
+        return -numpy.inf
     return lp + lnlike
 
 
@@ -206,17 +221,28 @@ def ssppop_fitting(
     progress,
     ncases,
     outdir,
+    p0_centre=None,
 ):
-    # Print progressbar
-    # printProgress(progress, ncases, prefix = ' Progress:', suffix = 'Complete', barLength = 50)
-
     ## Defining some parameters of the fitting
     ndim = len(params[0, :])
 
-    # Defining an initial set of walkers
-    zpt = numpy.mean(params, axis=0)
-    kick = [0.05, 0.05, 0.05]
-    p0 = [zpt + kick * numpy.random.randn(ndim) for i in range(nwalkers)]
+    param_min = numpy.amin(params, axis=0)
+    param_max = numpy.amax(params, axis=0)
+    param_range = param_max - param_min
+
+    if p0_centre is not None:
+        kick_scales = numpy.array([1.0, 0.1, 0.05])[:ndim]
+        p0 = []
+        for _ in range(nwalkers):
+            for _ in range(1000):
+                walker = numpy.array(p0_centre) + kick_scales * numpy.random.randn(ndim)
+                if numpy.all(walker >= param_min) and numpy.all(walker <= param_max):
+                    break
+            else:
+                walker = numpy.array(p0_centre)
+            p0.append(walker)
+    else:
+        p0 = [param_min + numpy.random.uniform(0, 1, ndim) * param_range for _ in range(nwalkers)]
 
     # Setting up the sampler
     sampler = emcee.EnsembleSampler(
@@ -225,7 +251,6 @@ def ssppop_fitting(
 
     # Running the Markov chain for NCHAIN iterations
     sampler.reset()
-    #    print("")
     for counter, result in enumerate(sampler.sample(p0, iterations=nchain)):
         if verbose == 1:
             printProgress(
@@ -236,36 +261,81 @@ def ssppop_fitting(
                 barLength=50,
             )
 
-    #    print("Mean acceptance fraction: {0:.3f}".format(numpy.mean(sampler.acceptance_fraction)))
-    #    print("Autocorrelation time:", sampler.get_autocorr_time())
+    try:
+        tau = sampler.get_autocorr_time()
+        burnin = int(2 * numpy.max(tau))
+        thin = max(1, int(0.5 * numpy.min(tau)))
+    except emcee.autocorr.AutocorrError:
+        burnin = int(0.3 * nchain)
+        thin = 1
+        logging.warning(f"Autocorrelation time could not be estimated for bin {progress}. "
+                        f"Falling back to burnin={burnin}.")
 
-    samples = sampler.chain
-    shape = samples.shape
-    nparams = shape[2]
-    samples_flat = samples[:, :, :].reshape(
-        (-1, nparams)
-    )  # Reshaping the output to [nchain,ndim]
-    nsamples = numpy.tile(numpy.linspace(0, shape[1] - 1, shape[1]), shape[0])
-    w = nsamples >= 0.5 * shape[1]
-    good_samples = samples_flat[w, :]
+    if burnin >= nchain:
+        burnin = int(0.3 * nchain)
+
+    good_samples = sampler.get_chain(discard=burnin, thin=thin, flat=True)
+
+    if len(good_samples) == 0:
+        logging.warning(f"No samples remaining after burnin/thinning for bin {progress}. Reducing burnin.")
+        burnin = int(0.1 * nchain)
+        thin = 1
+        good_samples = sampler.get_chain(discard=burnin, thin=thin, flat=True)
 
     # If desired, plot MCMC chain and corner plot
-    if plot == True:
+    if plot == True and outdir is not None:
+        mcmc_dir = os.path.join(outdir, "Fig_LS", "MCMC")
+        os.makedirs(mcmc_dir, exist_ok=True)
+
+        # ── Chain plot ────────────────────────────────────────────────────────
+        fig_chain, axes = plt.subplots(ndim, 1, figsize=(10, 2.5 * ndim), sharex=True)
+        if ndim == 1:
+            axes = [axes]
+
+        chain = sampler.get_chain()
         for i in range(ndim):
-            kk = sampler.chain[:, :, i]
-            idx = int(str(ndim) + "1" + str(i + 1))
-            plt.subplot(idx)
-            plt.plot(kk.T)
-            plt.ylabel(labels[i])
-        plt.savefig(outdir + "maps/MCMC/Chain_BINID" + str(progress) + ".pdf", dpi=30)
-        corner.corner(
-            good_samples,
+            for w in range(nwalkers):
+                axes[i].plot(chain[:, w, i], alpha=0.15, lw=0.5, color="k")
+            axes[i].axvline(burnin, color="k", lw=1.0, ls="--", alpha=0.7, label="burn-in" if i == 0 else "")
+            axes[i].set_ylabel(labels[i], fontsize=11)
+            axes[i].tick_params(labelsize=9, direction="in")
+
+        axes[0].legend(fontsize=8, frameon=False)
+        axes[-1].set_xlabel("Step", fontsize=11)
+        plt.suptitle(f"MCMC Chains - Bin {progress}", fontsize=12, y=1.01)
+        plt.tight_layout()
+        fig_chain.savefig(
+            os.path.join(mcmc_dir, f"Chain_BINID{progress}.png"),
+            dpi=300, bbox_inches="tight"
+        )
+        plt.close(fig_chain)
+
+        # ── Corner plot ───────────────────────────────────────────────────────
+        corner_kwargs = dict(
             labels=labels,
             quantiles=[0.16, 0.5, 0.84],
-            verbose=True,
-            plot_datapoints=False,
+            show_titles=True,
+            title_fmt=".3f",
+            title_kwargs={"fontsize": 11},
+            label_kwargs={"fontsize": 11},
+            color="black",
+            hist_kwargs={"color": "black", "lw": 1.0, "histtype": "step"},
+            plot_contours=True,
+            fill_contours=False,
+            contour_kwargs={"colors": "black", "linewidths": 0.8},
+            plot_datapoints=True,
+            data_kwargs={"alpha": 0.1, "ms": 1.0, "color": "black"},
+            smooth=1.0,
+            bins=30,
+            verbose=False,
         )
-        plt.savefig(outdir + "maps/MCMC/Corner_BINID" + str(progress) + ".pdf", dpi=30)
+        fig_corner = corner.corner(good_samples, **corner_kwargs)
+        plt.suptitle(f"Posterior — Bin {progress}", fontsize=12, y=1.01)
+        fig_corner.savefig(
+            os.path.join(mcmc_dir, f"Corner_BINID{progress}.png"),
+            dpi=300, bbox_inches="tight"
+        )
+        plt.close(fig_corner)
 
     # Storing results
     outpars = numpy.zeros(3 * ndim + 2)  # Params (3*ndim), LnP, flag
@@ -276,22 +346,24 @@ def ssppop_fitting(
 
     # Computing the chi2
     out_indices = compute_indices(
-        [outpars[0], outpars[3], outpars[6]], data, model_indices, params, tri
+        [outpars[i * 3] for i in range(ndim)], data, model_indices, params, tri
     )
-    bad = error <= 0.0
-    if numpy.any(bad):
-        error = error * 0.0 + 1e10
-    inv_sigma2 = 1.0 / error**2
-    outpars[3 * ndim] = -0.5 * numpy.sum(
-        (data - out_indices) ** 2 * inv_sigma2 - numpy.log(inv_sigma2)
-    )
+    if numpy.any(numpy.isnan(out_indices)):
+        outpars[3 * ndim] = numpy.nan
+    else:
+        good = (error > 0) & numpy.isfinite(error) & numpy.isfinite(data)
+        inv_sigma2 = 1.0 / error[good]**2
+        outpars[3 * ndim] = -0.5 * numpy.sum((data[good] - out_indices[good]) ** 2 * inv_sigma2 - numpy.log(inv_sigma2))
 
     # Flag cases where solution is close to a boundary of parameter space
     outpars[3 * ndim + 1] = 1
-    for i in range(ndim - 1):
+    boundary_fraction = 0.02
+    for i in range(ndim):
+        param_range_i = numpy.amax(params[:, i]) - numpy.amin(params[:, i])
+        threshold = boundary_fraction * param_range_i
         dlo = numpy.abs(outpars[3 * i] - numpy.amin(params[:, i]))
         dhi = numpy.abs(outpars[3 * i] - numpy.amax(params[:, i]))
-        if (dlo < 0.01) or (dhi < 0.01):
+        if (dlo < threshold) or (dhi < threshold):
             outpars[3 * ndim + 1] = 0
 
     return outpars, good_samples
@@ -348,7 +420,7 @@ if __name__ == "__main__":
         "-k",
         "--nchain",
         dest="nchain",
-        type="long",
+        type="int",
         default=1000,
         help="number of iterations to run",
     )
