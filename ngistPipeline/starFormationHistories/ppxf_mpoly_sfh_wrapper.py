@@ -885,6 +885,8 @@ def extractStarFormationHistories(config):
         
     velscale_ratio = 2
 
+    lam_pad = 100  # Angstroms padding to ensure templates exceed galaxy wavelength range
+
     (
         templates,
         lamRange_temp,
@@ -899,8 +901,8 @@ def extractStarFormationHistories(config):
         nAlpha,
     ) = _prepareTemplates.prepareTemplates_Module(
         config,
-        config["READ_DATA"]["LMIN_TOT"],
-        config["READ_DATA"]["LMAX_TOT"],
+        config["READ_DATA"]["LMIN_TOT"] - lam_pad,
+        config["READ_DATA"]["LMAX_TOT"] + lam_pad,
         velscale/velscale_ratio,
         LSF_Data,
         LSF_Templates,
