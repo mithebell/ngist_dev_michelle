@@ -808,6 +808,7 @@ def save_sfh(
     goodpixClnHDU = _auxiliary.saveConfigToHeader(goodpixClnHDU, config["SFH"])
     mpolyHDU = _auxiliary.saveConfigToHeader(mpolyHDU, config["SFH"])
     HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU, logLamTempHDU, specHDU, goodpixHDU, goodpixClnHDU, mpolyHDU])
+    HDUList.writeto(outfits_sfh, overwrite=True)
 
     fits.setval(outfits_sfh, "VELSCALE", value=velscale)
     fits.setval(outfits_sfh, "CRPIX1", value=1.0)
