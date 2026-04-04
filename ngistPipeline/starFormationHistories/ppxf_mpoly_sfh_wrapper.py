@@ -909,7 +909,7 @@ def extractStarFormationHistories(config):
     )
 
     # check that template wavelength is larger than requested fit range otherwise stop
-    if (lamRange_temp[0] >= config["READ_DATA"]["LMIN_TOT"]) or (lamRange_temp[1] <= config["READ_DATA"]["LMAX_TOT"]):
+    if (lamRange_temp[0] >= config["SFH"]["LMIN"]) or (lamRange_temp[1] <= config["SFH"]["LMAX"]):
         logging.info("Template wavelength range needs to be larger than fitting range, exiting")
         printStatus.warning(
             "Template wavelength range needs to be larger than fitting range, exiting"
