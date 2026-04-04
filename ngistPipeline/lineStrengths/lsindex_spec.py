@@ -94,8 +94,8 @@ def calc_index(bands, name, ll, counts, plot, plot_dir=None, bin_id=None, run_id
     cb = cb / (bands[1] - bands[0])
     cr = cr / (bands[5] - bands[4])
     m = (cr - cb) / (lr - lb)
-    c1 = (m * (bands[2] - lb)) + cb
-    c2 = (m * (bands[3] - lb)) + cb
+    c1 = float((m * (bands[2] - lb)) + cb)
+    c2 = float((m * (bands[3] - lb)) + cb)
     cont = 0.5 * (c1 + c2) * (bands[3] - bands[2])
 
     #   print( cb, cr, s )
@@ -110,22 +110,27 @@ def calc_index(bands, name, ll, counts, plot, plot_dir=None, bin_id=None, run_id
     #   print( ind )
 
     if plot > 0:
+        ll = numpy.ravel(ll)
+        counts = numpy.ravel(counts)
+        win = (ll >= bands[0] - 0.05 * (bands[5] - bands[0])) & \
+              (ll <= bands[5] + 0.05 * (bands[5] - bands[0]))
+        ll_w = ll[win]
+        counts_w = counts[win]
         minx = bands[0] - 0.05 * (bands[5] - bands[0])
         maxx = bands[5] + 0.05 * (bands[5] - bands[0])
-        miny = numpy.amin(counts) - 0.05 * (numpy.amax(counts) - numpy.amin(counts))
-        maxy = numpy.amax(counts) + 0.05 * (numpy.amax(counts) - numpy.amin(counts))
+        miny = numpy.amin(counts_w) - 0.05 * (numpy.amax(counts_w) - numpy.amin(counts_w))
+        maxy = numpy.amax(counts_w) + 0.05 * (numpy.amax(counts_w) - numpy.amin(counts_w))
         fig = plt.figure()
-        plt.scatter(ll, counts, color="k")
+        plt.scatter(ll_w, counts_w, color="k", s=4)
         plt.xlabel("Wavelength ($\AA$)")
         plt.ylabel("Counts")
         plt.title(name)
         plt.xlim([minx, maxx])
         plt.ylim([miny, maxy])
-        dw = ll[1] - ll[0]
-        plt.plot([lb, lr], [c1 * dw, c2 * dw], "r")
-        good = (ll >= bands[2]) & (ll <= bands[3])
-        ynew = numpy.interp(ll, [lb, lr], [c1 * dw, c2 * dw])
-        plt.fill_between(ll[good], counts[good], ynew[good], facecolor="green")
+        plt.plot([lb, lr], [c1, c2], "r")
+        good = (ll_w >= bands[2]) & (ll_w <= bands[3])
+        ynew = numpy.interp(ll_w, [lb, lr], [c1, c2])
+        plt.fill_between(ll_w[good], counts_w[good], ynew[good], facecolor="green")
         for i in range(len(bands)):
             plt.plot([bands[i], bands[i]], [miny, maxy], "k--")
 

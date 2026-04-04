@@ -315,7 +315,7 @@ def ssppop_fitting(
             labels=labels,
             quantiles=[0.16, 0.5, 0.84],
             show_titles=True,
-            title_fmt=".3f",
+            title_fmt=".4f",
             title_kwargs={"fontsize": 11},
             label_kwargs={"fontsize": 11},
             color="black",

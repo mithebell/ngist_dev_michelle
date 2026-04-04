@@ -220,7 +220,9 @@ def run_ls(
             return (indices, errors, mc_chains)
 
     except Exception as e:
+        import traceback
         logging.warning(f"run_ls failed for bin {i}: {e}")
+        logging.warning(traceback.format_exc())
         if MCMC == True:
             return (np.nan, np.nan, np.nan, np.nan, np.nan)
         elif MCMC == False:

@@ -149,7 +149,9 @@ def run_ls(
             return (indices, errors, mc_chains)
 
     except Exception as e:
+        import traceback
         logging.warning(f"run_ls failed for bin {i}: {e}")
+        logging.warning(traceback.format_exc())
         if MCMC == True:
             return (np.nan, np.nan, np.nan, np.nan, np.nan)
         elif MCMC == False:
@@ -519,6 +521,7 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         espec = np.array(hdu[1].data.ESPEC)
         wave = np.array(hdu[2].data.LAM)
         nbins = spec.shape[0]
+        npix = spec.shape[1]
 
     # Read PPXF results
     ppxf_data = fits.open(
