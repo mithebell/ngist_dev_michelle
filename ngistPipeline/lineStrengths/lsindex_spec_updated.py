@@ -149,7 +149,7 @@ def calc_index_integral(bands, name, ll, counts, plot, plot_dir=None, bin_id=Non
         handles, labels_legend = plt.gca().get_legend_handles_labels()
         by_label = dict(zip(labels_legend, handles))
         plt.legend(by_label.values(), by_label.keys(),
-                title=f"EW = {float(ind):.4f} Å", loc="lower right")
+                title=f"EW = {float(ind):.4f} $\\AA$", loc="lower right")
         
         plt.tight_layout()
         

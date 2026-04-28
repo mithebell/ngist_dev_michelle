@@ -559,7 +559,7 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         idx_lamMax = np.where(binned_loglam_data[-1] == binned_eloglam_data)[0]
         idx_lam = np.arange(idx_lamMin, idx_lamMax + 1)
         oldspec = np.array(binned_spec_data)
-        oldespec = np.sqrt(np.array(binned_espec_data)[:, idx_lam]) * 0.001
+        oldespec = np.sqrt(np.array(binned_espec_data)[:, idx_lam])
         wave = np.array(binned_loglam_data)
 
         nbins = oldspec.shape[0]
