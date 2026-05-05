@@ -198,7 +198,7 @@ def run_ppxf_firsttime(
         quiet=True,
         moments=nmoments,
         degree=-1,
-        vsyst=offset,
+        vsyst=0,
         mdegree=mdeg,
         regul = regul,
         velscale_ratio=velscale_ratio,
@@ -257,7 +257,6 @@ def run_ppxf(
     idx_lam_sfh,
     logLam_full,
     logLam_template,
-    optimal_template_step0=None,
 ):
 
     """
@@ -269,9 +268,6 @@ def run_ppxf(
     Step 0: fit dust (EBV) over the full range (LMIN_TOT/LMAX_TOT).
     Steps 1-3: identical to ppxf_sfh_wrapper, but run on the science range
                (LMIN/LMAX) with EBV fixed from Step 0.
-
-    If optimal_template_step0 is provided it is used for Step 0, bypassing
-    per-bin OPT_TEMP re-derivation.
     """
     # printStatus.progressBar(i, nbins, barLength=50)
 
@@ -288,37 +284,27 @@ def run_ppxf(
 
             # Here add in the extra, 0th step to estimate the dust and print out the E(B-V) map
             # Call PPXF, using an extinction law, no polynomials.
-            # First define the dust law (from cappellari 2023):
             # Step 0 runs over the FULL range (LMIN_TOT/LMAX_TOT).
-            # Use pre-saved optimal template set if provided, else optimal_template_in.
-            opt_temp_step0 = optimal_template_step0 if optimal_template_step0 is not None else optimal_template_in
-            component_step0 = [0] * np.prod(opt_temp_step0.shape[1:])
+            component_step0 = [0] * np.prod(optimal_template_in.shape[1:])
             component_true_step0 = np.array(component_step0) == 0
             dust = [{"start": [EBV_init], "bounds": [[0, 8]], "component": component_true_step0}]
 
-            pp_step0 = ppxf(opt_temp_step0, log_bin_data, log_bin_error, velscale, lam=np.exp(logLam), 
-                            goodpixels=goodPixels_step0, degree=-1, mdegree=-1, vsyst=offset, 
-                            velscale_ratio=velscale_ratio, moments=nmoments, start=start, plot=False, 
+            pp_step0 = ppxf(optimal_template_in, log_bin_data, log_bin_error, velscale, lam=np.exp(logLam),
+                            goodpixels=goodPixels_step0, degree=-1, mdegree=-1, vsyst=0,
+                            velscale_ratio=velscale_ratio, moments=nmoments, start=start, plot=False,
                             dust=dust, component=component_step0, regul=0, quiet=True,
                             lam_temp=np.exp(logLam_template))
 
-            # check which optimal template method is preferred. If default rederive optimal set from step 0.
-            # If pre-saved template was provided, skip — it is already the optimal set.
-            if optimal_template_step0 is None and config["SFH"]["OPT_TEMP"] == "default":
-                # first reshape templates so that we can apply the weights
+            # check which optimal template method is preferred. If default rederive optimal set from step 0
+            if config["SFH"]["OPT_TEMP"] == "default":
                 reshaped_templates = templates.reshape((templates.shape[0], ncomb))
-                # find non zero weights from step 0
-                normalized_weights_step0 = pp_step0.weights / np.sum( pp_step0.weights )
+                normalized_weights_step0 = pp_step0.weights / np.sum(pp_step0.weights)
                 wNonzero_weights_step0 = np.where(normalized_weights_step0 > 0)[0]
                 nNonzero_weights_step0 = np.shape(wNonzero_weights_step0)[0]
-                # prepare optimal template set
-                optimal_template_set_step0 = np.zeros( [reshaped_templates.shape[0], nNonzero_weights_step0])
+                optimal_template_set_step0 = np.zeros([reshaped_templates.shape[0], nNonzero_weights_step0])
                 for j in range(0, nNonzero_weights_step0):
                     optimal_template_set_step0[:,j] = reshaped_templates[:,wNonzero_weights_step0[j]]
-                # replace optimal template with set from step zero
                 optimal_template_in = optimal_template_set_step0
-            elif optimal_template_step0 is not None:
-                optimal_template_in = optimal_template_step0
 
             # Save dust values
             Rv = 4.05
@@ -377,7 +363,7 @@ def run_ppxf(
                 quiet=True,
                 moments=nmoments,
                 degree=-1,
-                vsyst=offset,
+                vsyst=0,
                 mdegree=mdeg,
                 fixed=fixed,
                 lam=np.exp(logLam),
@@ -430,7 +416,7 @@ def run_ppxf(
                 quiet=True,
                 moments=nmoments,
                 degree=-1,
-                vsyst=offset,
+                vsyst=0,
                 mdegree=mdeg,
                 regul = regul,
                 fixed=fixed,
@@ -507,7 +493,7 @@ def run_ppxf(
                     quiet=True,
                     moments=nmoments,
                     degree=-1,
-                    vsyst=offset,
+                    vsyst=0,
                     mdegree=mdeg,
                     regul = 0,
                     fixed=fixed,
@@ -1130,66 +1116,6 @@ def extractStarFormationHistories(config):
     # ====================
     EBV_init = 0.1 # PHANGS value initial guess
 
-    # Run a single Step 0 on the combined spectrum over the full range to derive
-    # a shared optimal template set. This is used by all per-bin Step 0 calls
-    # instead of re-deriving the optimal template independently per bin.
-    printStatus.running("Running Step 0 on combined spectrum to derive shared optimal template set")
-    logging.info("Running Step 0 on combined spectrum to derive shared optimal template set")
-    comb_spec_step0  = np.nanmean(bin_data, axis=1)
-    comb_espec_step0 = np.nanmean(bin_err,  axis=1)
-    median_comb      = np.nanmedian(comb_spec_step0)
-    comb_spec_norm   = comb_spec_step0  / median_comb
-    comb_espec_norm  = comb_espec_step0 / median_comb
-
-    _ncomp_step0         = np.prod(optimal_template_comb.shape[1:])
-    _component_step0     = [0] * _ncomp_step0
-    _component_true_step0 = np.array(_component_step0) == 0
-    _dust_step0 = [{"start": [EBV_init], "bounds": [[0, 8]], "component": _component_true_step0}]
-    _nmoments_step0 = config["SFH"]["MOM"] if config["SFH"]["FIXED"] == False else config["KIN"]["MOM"]
-
-    pp_step0_comb = ppxf(
-        optimal_template_comb,
-        comb_spec_norm,
-        comb_espec_norm,
-        velscale,
-        start[0, :],
-        goodpixels=goodPixels_step0_sfh,
-        degree=-1,
-        mdegree=-1,
-        vsyst=offset,
-        velscale_ratio=velscale_ratio,
-        moments=_nmoments_step0,
-        plot=False,
-        quiet=True,
-        dust=_dust_step0,
-        component=_component_step0,
-        regul=0,
-        lam=np.exp(logLam),
-        lam_temp=np.exp(logLam_template),
-    )
-
-    _reshaped = templates.reshape((templates.shape[0], ncomb))
-    _norm_w   = pp_step0_comb.weights / np.sum(pp_step0_comb.weights)
-    _wNonzero = np.where(_norm_w > 0)[0]
-    _nNonzero = len(_wNonzero)
-    optimal_template_step0 = np.zeros((_reshaped.shape[0], _nNonzero))
-    for _j in range(_nNonzero):
-        optimal_template_step0[:, _j] = _reshaped[:, _wNonzero[_j]]
-
-    printStatus.updateDone(
-        f"Step 0 combined: EBV = {pp_step0_comb.dust[0]['sol'][0]/4.05:.4f}, "
-        f"{_nNonzero} non-zero templates"
-    )
-    logging.info(f"Step 0 combined: {_nNonzero} non-zero templates, EBV = {pp_step0_comb.dust[0]['sol'][0]/4.05:.4f}")
-
-    # Save the optimal template set to disk so it can be inspected or reloaded
-    optimal_template_step0_file = os.path.join(
-        config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]
-    ) + "_sfh_optimal_template_step0.npy"
-    np.save(optimal_template_step0_file, optimal_template_step0)
-    printStatus.running(f"Saved optimal template set ({_nNonzero} templates) to {optimal_template_step0_file}")
-    logging.info(f"Saved optimal template set to {optimal_template_step0_file}")
-
     # ====================
     # Run PPXF
     start_time = time.time()
@@ -1249,7 +1175,6 @@ def extractStarFormationHistories(config):
                     idx_lam_sfh,
                     logLam_full,
                     logLam_template,
-                    optimal_template_step0=optimal_template_step0,
                 )
                 results.append(result)
             return results
@@ -1348,7 +1273,6 @@ def extractStarFormationHistories(config):
                 idx_lam_sfh,
                 logLam_full,
                 logLam_template,
-                optimal_template_step0=optimal_template_step0,
             )
             w_row_MC_iter[i,:,:] = mc_results_i["w_row_MC_iter"]
             w_row_MC_mean[i,:] = mc_results_i["w_row_MC_mean"]
