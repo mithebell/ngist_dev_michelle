@@ -547,6 +547,17 @@ def run_ppxf(
             model_fif[a_idx, :] = np.interp(
                 wave_fif, wave_b3b4_temp, model_norm_a[idx_b3b4_temp])
 
+        # Per-bin additional convolution of model FIF vectors from sigma_min to
+        # sigma_kin, following Martin-Navarro et al. 2019: models are pre-computed
+        # at sigma_min resolution and then convolved per-bin to match the galaxy's
+        # native (LSF + sigma_kin) resolution. In log-lambda space this is a
+        # constant Gaussian sigma in km/s: sqrt(sigma_kin^2 - sigma_min^2).
+        sigma_extra_kms = np.sqrt(max(pp.sol[1]**2 - sigma_min**2, 0.0))
+        sigma_pix_extra = sigma_extra_kms / velscale
+        if sigma_pix_extra > 0.01:
+            for a_idx in range(nAlpha):
+                model_fif[a_idx, :] = gaussian_filter1d(model_fif[a_idx, :], sigma_pix_extra)
+
         # 1-D EMCEE over alpha; each b3-b4 pixel is an independent observable
         # (Martin-Navarro et al. 2019, Eq. 3). Model is linearly interpolated
         # across the alpha grid using np.interp (avoids Delaunay for 1-D case).
