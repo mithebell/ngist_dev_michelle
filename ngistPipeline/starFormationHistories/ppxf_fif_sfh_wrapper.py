@@ -392,8 +392,9 @@ def run_ppxf(
     templates_mgb_lib,
     wave_temp_mgb,
     idx_gal_mgb,
+    idx_gal_b3b4,
     lsf_data_full,
-    sigma_min,
+    sigma_max,           # maximum velocity dispersion across all bins (km/s)
     mgb_bands,
     nwalkers_fif,
     nchain_fif,
@@ -500,12 +501,14 @@ def run_ppxf(
         # (templates_mgb_lib is already convolved to sigma_min and cropped to the
         # Mgb window -- see extractStarFormationHistories)
 
-        # Step 6: flag bins where sigma_kin > sigma_min (cannot reach target resolution)
-        # sigma_pix_gal will be ~0 (native >= target), so galaxy_conv ~ log_bin_data
+        # Step 6: convolve galaxy from (LSF_Data + sigma_kin) to sigma_max so all
+        # bins are compared at the same resolution with consistent Mgb bandpass.
+        # Bins where sigma_kin > sigma_max are flagged (MGB_RES_FLAG=1).
         wave_gal_full = np.exp(logLam)
-        sigma_kin_fwhm_gal = pp.sol[1] * wave_gal_full / C * 2.355
-        native_fwhm_gal = np.sqrt(lsf_data_full**2 + sigma_kin_fwhm_gal**2)
-        target_fwhm_gal = np.sqrt(lsf_data_full**2 + (sigma_min * wave_gal_full / C * 2.355)**2)
+        sigma_kin_fwhm = pp.sol[1] * wave_gal_full / C * 2.355
+        native_fwhm_gal = np.sqrt(lsf_data_full**2 + sigma_kin_fwhm**2)
+        target_fwhm_gal = np.sqrt(lsf_data_full**2 +
+                                   (sigma_max * wave_gal_full / C * 2.355)**2)
         sigma_pix_gal, flag_gal = resolution_sigma_pix(
             wave_gal_full, native_fwhm_gal, target_fwhm_gal, velscale)
         galaxy_conv = gaussian_filter1d(log_bin_data, sigma_pix_gal)
@@ -524,11 +527,13 @@ def run_ppxf(
         gal_norm, noise_norm, cont_gal = normalize_pseudocont(
             wave_b1b6, log_bin_data_b1b6, b1, b2, b5, b6, noise=noise_b1b6)
 
-        idx_b3b4_gal = (wave_b1b6 >= b3) & (wave_b1b6 <= b4)
-        gal_fif   = gal_norm[idx_b3b4_gal]
-        noise_fif = np.abs(noise_norm[idx_b3b4_gal])
-        wave_fif  = wave_b1b6[idx_b3b4_gal]
-        n_pix_fif = len(gal_fif)
+        # Use the fixed common wavelength grid for b3-b4 (computed from mean
+        # redshift in extractStarFormationHistories) to ensure consistent
+        # array sizes across bins despite per-bin deredshift variation.
+        wave_fif  = wave_gal_rest[idx_gal_b3b4]   # fixed grid, npix_b3b4 pixels
+        n_pix_fif = len(wave_fif)
+        gal_fif   = np.interp(wave_fif, wave_b1b6, gal_norm)
+        noise_fif = np.abs(np.interp(wave_fif, wave_b1b6, noise_norm))
 
         # Step 8: build per-alpha model FIF vectors and run EMCEE
         # For each alpha, sum templates weighted by the step-3 age/met weights,
@@ -547,16 +552,8 @@ def run_ppxf(
             model_fif[a_idx, :] = np.interp(
                 wave_fif, wave_b3b4_temp, model_norm_a[idx_b3b4_temp])
 
-        # Per-bin additional convolution of model FIF vectors from sigma_min to
-        # sigma_kin, following Martin-Navarro et al. 2019: models are pre-computed
-        # at sigma_min resolution and then convolved per-bin to match the galaxy's
-        # native (LSF + sigma_kin) resolution. In log-lambda space this is a
-        # constant Gaussian sigma in km/s: sqrt(sigma_kin^2 - sigma_min^2).
-        sigma_extra_kms = np.sqrt(max(pp.sol[1]**2 - sigma_min**2, 0.0))
-        sigma_pix_extra = sigma_extra_kms / velscale
-        if sigma_pix_extra > 0.01:
-            for a_idx in range(nAlpha):
-                model_fif[a_idx, :] = gaussian_filter1d(model_fif[a_idx, :], sigma_pix_extra)
+        # Templates are pre-convolved to LSF_Data + sigma_max in
+        # extractStarFormationHistories. No per-bin model convolution needed.
 
         # 1-D EMCEE over alpha; each b3-b4 pixel is an independent observable
         # (Martin-Navarro et al. 2019, Eq. 3). Model is linearly interpolated
@@ -719,7 +716,7 @@ def save_sfh(
     columns.append(fits.Column(name="SNR_POSTFIT",  format="D", array=snr_postfit[:]))
     columns.append(fits.Column(name="RED_CHI2",     format="D", array=red_chi2[:]))
     columns.append(fits.Column(name="N_SURVIVORS",  format="J", array=n_survivors[:]))
-    # MGB_RES_FLAG=1 if sigma_kin > sigma_min (bin cannot reach target resolution)
+    # MGB_RES_FLAG=1 if sigma_kin > sigma_max (bin already broader than target)
     columns.append(fits.Column(name="MGB_RES_FLAG", format="J", array=mgb_res_flag[:]))
     columns.append(fits.Column(name="EBV",          format="D", array=EBV[:]))
 
@@ -922,17 +919,17 @@ def extractStarFormationHistories(config):
         for i in range(nbins):
             start[i, :] = np.array(ppxf_data[i][: config["KIN"]["MOM"]])
 
-        # sigma_min: minimum measured velocity dispersion -- used as the FIF
-        # convolution target following Martin-Navarro et al. 2019
+        # sigma_max: maximum measured velocity dispersion -- common convolution
+        # target so all bins see the same effective Mgb bandpass.
         sigma_kin_all = np.array(ppxf_data.SIGMA[:])
         valid_sigma = sigma_kin_all[sigma_kin_all > 0]
         if len(valid_sigma) > 0:
-            sigma_min = float(np.nanmin(valid_sigma))
+            sigma_max = float(np.nanmax(valid_sigma))
         else:
-            sigma_min = float(config["KIN"]["SIGMA"])
-            logging.warning(f"No valid sigma > 0 in _kin.fits; falling back to KIN.SIGMA = {sigma_min:.1f} km/s")
-        logging.info(f"FIF sigma_min = {sigma_min:.1f} km/s (minimum of {len(valid_sigma)} valid bins)")
-        printStatus.running(f"FIF sigma_min = {sigma_min:.1f} km/s")
+            sigma_max = float(config["KIN"]["SIGMA"])
+            logging.warning(f"No valid sigma in _kin.fits; falling back to KIN.SIGMA = {sigma_max:.1f} km/s")
+        logging.info(f"FIF sigma_max = {sigma_max:.1f} km/s")
+        printStatus.running(f"FIF sigma_max = {sigma_max:.1f} km/s")
 
     elif config["SFH"]["FIXED"] == False:
         logging.info("Stellar kinematics are NOT FIXED.")
@@ -945,32 +942,33 @@ def extractStarFormationHistories(config):
                 start[i, :] = np.array([0.0, config["KIN"]["SIGMA"], 0.0, 0.0])
             elif config["SFH"]["MOM"] == 6:
                 start[i, :] = np.array([0.0, config["KIN"]["SIGMA"], 0.0, 0.0, 0.0, 0.0])
-        # fall back to the config initial guess when kinematics are not pre-fixed
-        sigma_min = float(config["KIN"]["SIGMA"])
-        logging.warning(f"SFH.FIXED=False: sigma_min set to KIN.SIGMA = {sigma_min:.1f} km/s.")
+        sigma_max = float(config["KIN"]["SIGMA"])
+        logging.warning(f"SFH.FIXED=False: sigma_max set to KIN.SIGMA = {sigma_max:.1f} km/s.")
 
     # Convolve the full template grid to the sigma_min-equivalent FWHM:
     # sqrt(LSF_Data^2 + (sigma_min * wave / C * 2.355)^2), evaluated at
     # template wavelengths. This matches the resolution of the minimum-sigma
     # data bin, following Martin-Navarro et al. 2019.
     wave_temp_full   = np.exp(logLam_template)
-    native_fwhm_temp = LSF_Templates(wave_temp_full)
     lsf_data_at_temp = LSF_Data(wave_temp_full)
+    # Pre-convolve templates from native LSF_Templates to LSF_Data only.
+    # Kinematic broadening is applied per-bin inside run_ppxf.
+    native_fwhm_temp = LSF_Templates(wave_temp_full)
     target_fwhm_temp = np.sqrt(lsf_data_at_temp**2 +
-                                (sigma_min * wave_temp_full / C * 2.355)**2)
+                                (sigma_max * wave_temp_full / C * 2.355)**2)
     sigma_pix_temp, flag_temp = resolution_sigma_pix(
         wave_temp_full, native_fwhm_temp, target_fwhm_temp, velscale / velscale_ratio)
 
     if np.any(flag_temp):
-        logging.warning("Template native resolution exceeds sigma_min target at some wavelengths.")
+        logging.warning("Template native resolution already exceeds data LSF at some wavelengths.")
 
-    printStatus.running(f"Convolving {ncomb} templates to sigma_min = {sigma_min:.1f} km/s...")
+    printStatus.running(f"Convolving {ncomb} templates to sigma_max = {sigma_max:.1f} km/s...")
     templates_full_2d      = templates_full.reshape(templates_full.shape[0], ncomb)
     templates_full_conv_2d = np.empty_like(templates_full_2d)
     for k in range(ncomb):
         templates_full_conv_2d[:, k] = gaussian_filter1d(templates_full_2d[:, k], sigma_pix_temp)
     templates_full_conv = templates_full_conv_2d.reshape(templates_full.shape)
-    printStatus.updateDone(f"Convolving {ncomb} templates to sigma_min = {sigma_min:.1f} km/s",
+    printStatus.updateDone(f"Convolving {ncomb} templates to sigma_max = {sigma_max:.1f} km/s",
                             progressbar=False)
 
     # crop to the Mgb window (padded to cover pseudo-continuum sidebands)
@@ -1043,8 +1041,8 @@ def extractStarFormationHistories(config):
             npix, ncomb_alpha, ncomb, nAges, nMetal, nAlpha, nbins, ii,
             optimal_template_comb, EBV_init, logLam,
             logAge_grid, metal_grid, alpha_grid, config, doplot,
-            templates_mgb_lib, wave_temp_mgb, idx_gal_mgb, lsf_data_full,
-            sigma_min, mgb_bands, nwalkers_fif, nchain_fif, alpha_values)
+            templates_mgb_lib, wave_temp_mgb, idx_gal_mgb, idx_gal_b3b4, lsf_data_full,
+            sigma_max, mgb_bands, nwalkers_fif, nchain_fif, alpha_values)
 
     def _unpack(ii, res):
         ppxf_result[ii, :config["SFH"]["MOM"]] = res[0]
