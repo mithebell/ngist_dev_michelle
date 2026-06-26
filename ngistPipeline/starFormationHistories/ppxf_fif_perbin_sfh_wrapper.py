@@ -304,33 +304,42 @@ def run_ppxf_firsttime(templates, log_bin_data, log_bin_error, velscale, start,
 
 
 def run_fif_emcee_1d(data, error, model_fif, alpha_values, alpha_fix, nwalkers, nchain):
-    """
-    1-D EMCEE fit for [alpha/Fe] from FIF pixel data.
-    model_fif has shape (nAlpha, n_pix); interpolation is linear via np.interp.
-    Returns (median_alpha, err_lo, err_hi) where err_lo/hi are 16th/84th percentile
-    offsets from the median (same sign convention as ssppop_fitting).
-    """
+
     alpha_min = alpha_values[0]
     alpha_max = alpha_values[-1]
 
+    from scipy.interpolate import interp1d
+
+    model_interp = interp1d(
+        alpha_values,
+        model_fif,
+        axis=0,
+        bounds_error=False,
+        fill_value=(model_fif[0], model_fif[-1])
+    )
+
+    good = (error > 0) & np.isfinite(error) & np.isfinite(data)
+
+    inv_sigma2 = np.zeros_like(error)
+    inv_sigma2[good] = 1.0 / error[good]**2
+
     def lnprob(par):
         alpha = par[0]
-        if not (alpha_min <= alpha <= alpha_max):
-            return -np.inf
-        # interpolate model FIF vector at this alpha (vectorised over pixels)
-        idx = np.searchsorted(alpha_values, alpha)
-        idx = np.clip(idx, 1, len(alpha_values) - 1)
-        t = (alpha - alpha_values[idx - 1]) / (alpha_values[idx] - alpha_values[idx - 1])
-        model_at_alpha = (1.0 - t) * model_fif[idx - 1, :] + t * model_fif[idx, :]
-        good = (error > 0) & np.isfinite(error) & np.isfinite(data)
-        if np.sum(good) == 0:
-            return -np.inf
-        inv_sigma2 = 1.0 / error[good]**2
-        lnlike = -0.5 * np.sum((data[good] - model_at_alpha[good])**2 * inv_sigma2
-                                - np.log(inv_sigma2))
-        return lnlike if np.isfinite(lnlike) else -np.inf
 
-    # initialise walkers in a small ball around alpha_fix
+        if alpha < alpha_min or alpha > alpha_max:
+            return -1e300
+
+        model_at_alpha = model_interp(alpha)
+
+        resid = data - model_at_alpha
+
+        lnlike = -0.5 * np.sum(
+            resid[good]**2 * inv_sigma2[good]
+            + np.log(error[good]**2)
+        )
+
+        return lnlike
+
     p0 = [[alpha_fix + 0.02 * np.random.randn()] for _ in range(nwalkers)]
     p0 = [[np.clip(p[0], alpha_min, alpha_max)] for p in p0]
 
@@ -338,21 +347,20 @@ def run_fif_emcee_1d(data, error, model_fif, alpha_values, alpha_fix, nwalkers, 
     sampler.run_mcmc(p0, nchain, progress=False)
 
     try:
-        tau    = sampler.get_autocorr_time()
+        tau = sampler.get_autocorr_time()
         burnin = int(2 * np.max(tau))
-        thin   = max(1, int(0.5 * np.min(tau)))
+        thin = max(1, int(0.5 * np.min(tau)))
     except emcee.autocorr.AutocorrError:
         burnin = int(0.3 * nchain)
-        thin   = 1
+        thin = 1
 
-    if burnin >= nchain:
-        burnin = int(0.3 * nchain)
+    burnin = min(burnin, int(0.3 * nchain))
 
     flat = sampler.get_chain(discard=burnin, thin=thin, flat=True)[:, 0]
 
-    median   = np.percentile(flat, 50)
-    err_lo   = np.percentile(flat, 16) - median
-    err_hi   = np.percentile(flat, 84) - median
+    median = np.percentile(flat, 50)
+    err_lo = np.percentile(flat, 16) - median
+    err_hi = np.percentile(flat, 84) - median
 
     return median, err_lo, err_hi
 
@@ -533,24 +541,25 @@ def run_ppxf(
         idx_b3b4_temp = (wave_temp_mgb >= b3) & (wave_temp_mgb <= b4)
         wave_b3b4_temp = wave_temp_mgb[idx_b3b4_temp]
 
+        sigma_pix_extra = pp.sol[1] / velscale
+        do_conv = sigma_pix_extra > 0.01
+
         model_fif = np.zeros((nAlpha, n_pix_fif))
+
         for a_idx in range(nAlpha):
+
             model_spec_a = np.zeros(len(wave_temp_mgb))
+
             for k in range(n_survive):
                 w = weights_alpha[survive_age_idx[k], survive_met_idx[k]]
-                model_spec_a += w * templates_mgb_lib[:, survive_age_idx[k],
-                                                         survive_met_idx[k], a_idx]
-            model_norm_a, _ = normalize_pseudocont(wave_temp_mgb, model_spec_a, b1, b2, b5, b6)
-            model_fif[a_idx, :] = np.interp(
-                wave_fif, wave_b3b4_temp, model_norm_a[idx_b3b4_temp])
+                model_spec_a += w * templates_mgb_lib[:, survive_age_idx[k], survive_met_idx[k], a_idx]
 
-        # Per-bin convolution: add sigma_kin to bring templates from LSF_Data
-        # resolution to match the galaxy's native (LSF_Data + sigma_kin) resolution.
-        # In log-lambda space this is a constant sigma_kin / velscale pixels.
-        sigma_pix_extra = pp.sol[1] / velscale
-        if sigma_pix_extra > 0.01:
-            for a_idx in range(nAlpha):
-                model_fif[a_idx, :] = gaussian_filter1d(model_fif[a_idx, :], sigma_pix_extra)
+            if do_conv:
+                model_spec_a = gaussian_filter1d(model_spec_a, sigma_pix_extra)
+
+            model_norm_a, _ = normalize_pseudocont(wave_temp_mgb, model_spec_a, b1, b2, b5, b6)
+            model_slice = model_norm_a[idx_b3b4_temp]
+            model_fif[a_idx, :] = np.interp(wave_fif, wave_b3b4_temp, model_slice)
 
         # 1-D EMCEE over alpha; each b3-b4 pixel is an independent observable
         # (Martin-Navarro et al. 2019, Eq. 3). Model is linearly interpolated

@@ -59,7 +59,6 @@ PURPOSE:
 
 def plot_ppxf_sfh(pp, x, i, outfig_ppxf, snrCubevar=-99, snrResid=-99,
                    goodpixelsPre=[], norm=False, mean_results=''):
-    # routine to plot first and final pPXF fit
     fig = plt.figure(i, figsize=(13, 3.0))
     ax2 = plt.subplot(111)
 
@@ -93,7 +92,6 @@ def plot_ppxf_sfh(pp, x, i, outfig_ppxf, snrCubevar=-99, snrResid=-99,
         for k in goodpixels[[0, -1]]:
             plt.plot(x[[k, k]], [mn, stars_bestfit[k]], 'lightpink', linewidth=0.5)
 
-        # repeat square lines with pp_step1
         w = np.flatnonzero(np.diff(goodpixelsPre) > 1)
         for wj in w:
             a, b = goodpixelsPre[wj: wj + 2]
@@ -145,22 +143,15 @@ def plot_fif(wave_b1b6, gal_norm_b1b6, wave_fif, model_fif_best,
               b1, b2, b3, b4, b5, b6,
               alpha_fif, alpha_fif_lo, alpha_fif_hi,
               age, met, i, outfig):
-    # FIF Mgb plot in pseudo-continuum normalised space: sidebands sit at ~1.0
-    # by construction, continuum is a flat line at 1.0, model plots directly.
-    # Mirrors the LS plot format (Martin-Navarro et al. 2019, Fig. 1).
+
     fig, ax = plt.subplots(figsize=(13, 4))
 
     ax.plot(wave_b1b6, gal_norm_b1b6, 'black', linewidth=0.8)
+    ax.plot([b1, b6], [1.0, 1.0], color='red', linewidth=1.5)
+    ax.plot(wave_fif, model_fif_best, color='red', linewidth=1.5)
 
-    # pseudo-continuum is 1.0 by definition after normalisation
-    ax.plot([b1, b6], [1.0, 1.0], color='red', linewidth=1.5, label='Continuum')
-
-    # best-fit model (already normalised)
-    ax.plot(wave_fif, model_fif_best, color='red', linewidth=1.5, label='Model')
-
-    # band shading
-    ax.axvspan(b1, b2, color='skyblue', alpha=0.5, label='Pseudo-continua')
-    ax.axvspan(b3, b4, color='grey',    alpha=0.2, label='Central bandpass')
+    ax.axvspan(b1, b2, color='skyblue', alpha=0.5)
+    ax.axvspan(b3, b4, color='grey',    alpha=0.2)
     ax.axvspan(b5, b6, color='skyblue', alpha=0.5)
 
     ax.set(xlabel='wavelength [Ang]', ylabel='Normalised flux')
@@ -171,12 +162,9 @@ def plot_fif(wave_b1b6, gal_norm_b1b6, wave_fif, model_fif_best,
     plotText = (f"nGIST - Bin {i:10.0f}: Age = {age:.2f} Gyr, [M/H] = {met:.2f}, "
                 f"[alpha/Fe] = {alpha_fif:.3f} ({alpha_fif_lo:+.3f} / {alpha_fif_hi:+.3f})")
     ax.text(0.01, 0.95, plotText, fontsize=10, ha='left', va='top',
-             transform=ax.transAxes, backgroundcolor='white')
+            transform=ax.transAxes, backgroundcolor='white')
 
-    handles, labels_leg = ax.get_legend_handles_labels()
-    by_label = dict(zip(labels_leg, handles))
-    ax.legend(by_label.values(), by_label.keys(), loc='lower right', fontsize=9)
-
+    ax.legend(loc='lower right', fontsize=9)
     plt.savefig(outfig, bbox_inches='tight', pad_inches=0.3)
     plt.close()
 
@@ -304,33 +292,42 @@ def run_ppxf_firsttime(templates, log_bin_data, log_bin_error, velscale, start,
 
 
 def run_fif_emcee_1d(data, error, model_fif, alpha_values, alpha_fix, nwalkers, nchain):
-    """
-    1-D EMCEE fit for [alpha/Fe] from FIF pixel data.
-    model_fif has shape (nAlpha, n_pix); interpolation is linear via np.interp.
-    Returns (median_alpha, err_lo, err_hi) where err_lo/hi are 16th/84th percentile
-    offsets from the median (same sign convention as ssppop_fitting).
-    """
+
     alpha_min = alpha_values[0]
     alpha_max = alpha_values[-1]
 
+    from scipy.interpolate import interp1d
+
+    model_interp = interp1d(
+        alpha_values,
+        model_fif,
+        axis=0,
+        bounds_error=False,
+        fill_value=(model_fif[0], model_fif[-1])
+    )
+
+    good = (error > 0) & np.isfinite(error) & np.isfinite(data)
+
+    inv_sigma2 = np.zeros_like(error)
+    inv_sigma2[good] = 1.0 / error[good]**2
+
     def lnprob(par):
         alpha = par[0]
-        if not (alpha_min <= alpha <= alpha_max):
-            return -np.inf
-        # interpolate model FIF vector at this alpha (vectorised over pixels)
-        idx = np.searchsorted(alpha_values, alpha)
-        idx = np.clip(idx, 1, len(alpha_values) - 1)
-        t = (alpha - alpha_values[idx - 1]) / (alpha_values[idx] - alpha_values[idx - 1])
-        model_at_alpha = (1.0 - t) * model_fif[idx - 1, :] + t * model_fif[idx, :]
-        good = (error > 0) & np.isfinite(error) & np.isfinite(data)
-        if np.sum(good) == 0:
-            return -np.inf
-        inv_sigma2 = 1.0 / error[good]**2
-        lnlike = -0.5 * np.sum((data[good] - model_at_alpha[good])**2 * inv_sigma2
-                                - np.log(inv_sigma2))
-        return lnlike if np.isfinite(lnlike) else -np.inf
 
-    # initialise walkers in a small ball around alpha_fix
+        if alpha < alpha_min or alpha > alpha_max:
+            return -1e300
+
+        model_at_alpha = model_interp(alpha)
+
+        resid = data - model_at_alpha
+
+        lnlike = -0.5 * np.sum(
+            resid[good]**2 * inv_sigma2[good]
+            + np.log(error[good]**2)
+        )
+
+        return lnlike
+
     p0 = [[alpha_fix + 0.02 * np.random.randn()] for _ in range(nwalkers)]
     p0 = [[np.clip(p[0], alpha_min, alpha_max)] for p in p0]
 
@@ -338,24 +335,22 @@ def run_fif_emcee_1d(data, error, model_fif, alpha_values, alpha_fix, nwalkers, 
     sampler.run_mcmc(p0, nchain, progress=False)
 
     try:
-        tau    = sampler.get_autocorr_time()
+        tau = sampler.get_autocorr_time()
         burnin = int(2 * np.max(tau))
-        thin   = max(1, int(0.5 * np.min(tau)))
+        thin = max(1, int(0.5 * np.min(tau)))
     except emcee.autocorr.AutocorrError:
         burnin = int(0.3 * nchain)
-        thin   = 1
+        thin = 1
 
-    if burnin >= nchain:
-        burnin = int(0.3 * nchain)
+    burnin = min(burnin, int(0.3 * nchain))
 
     flat = sampler.get_chain(discard=burnin, thin=thin, flat=True)[:, 0]
 
-    median   = np.percentile(flat, 50)
-    err_lo   = np.percentile(flat, 16) - median
-    err_hi   = np.percentile(flat, 84) - median
+    median = np.percentile(flat, 50)
+    err_lo = np.percentile(flat, 16) - median
+    err_hi = np.percentile(flat, 84) - median
 
     return median, err_lo, err_hi
-
 
 def run_ppxf(
     templates_alpha,
@@ -394,7 +389,7 @@ def run_ppxf(
     idx_gal_mgb,
     idx_gal_b3b4,
     lsf_data_full,
-    sigma_max,           # maximum velocity dispersion across all bins (km/s)
+    sigma_max,
     mgb_bands,
     nwalkers_fif,
     nchain_fif,
@@ -411,15 +406,12 @@ def run_ppxf(
     try:
         if len(optimal_template_in) > 1:
 
-            # Normalise galaxy spectra and noise
             median_log_bin_data = np.nanmedian(log_bin_data)
             log_bin_error = log_bin_error / median_log_bin_data
             log_bin_data = log_bin_data / median_log_bin_data
 
-            # Calculate SNR before the fit from flux and flux_err
             snr_prefit = np.nanmedian(log_bin_data / log_bin_error)
 
-            # Step 0: EBV prefit -- no polynomials, dust only
             component_step0 = [0] * np.prod(optimal_template_in.shape[1:])
             component_true_step0 = np.array(component_step0) == 0
             dust = [{"start": [EBV_init], "bounds": [[0, 8]], "component": component_true_step0}]
@@ -430,18 +422,18 @@ def run_ppxf(
                              moments=nmoments, start=start, plot=False, dust=dust,
                              component=component_step0, regul=0, quiet=True)
 
-            # check which optimal template method is preferred
             if config["SFH"]["OPT_TEMP"] == "default":
                 reshaped_templates = templates_alpha.reshape((templates_alpha.shape[0], ncomb_alpha))
                 normalized_weights_step0 = pp_step0.weights / np.sum(pp_step0.weights)
                 wNonzero_weights_step0 = np.where(normalized_weights_step0 > 0)[0]
                 nNonzero_weights_step0 = np.shape(wNonzero_weights_step0)[0]
                 optimal_template_set_step0 = np.zeros([reshaped_templates.shape[0], nNonzero_weights_step0])
-                for j in range(0, nNonzero_weights_step0):
+
+                for j in range(nNonzero_weights_step0):
                     optimal_template_set_step0[:, j] = reshaped_templates[:, wNonzero_weights_step0[j]]
+
                 optimal_template_in = optimal_template_set_step0
 
-            # Save dust values
             Rv = 4.05
             Av = pp_step0.dust[0]["sol"][0]
             EBV = Av / Rv
@@ -460,120 +452,125 @@ def run_ppxf(
                 dust_step12 = None
                 dust_step6  = None
 
-            # Step 1: noise rescaling -- use fake noise for first iteration
             fake_noise = np.full_like(log_bin_data, 1.0)
+
             pp_step1 = ppxf(optimal_template_in, log_bin_data, fake_noise, velscale, start,
                              goodpixels=goodPixels_step0, plot=False, quiet=True,
                              moments=nmoments, degree=-1, vsyst=offset, mdegree=mdeg,
                              fixed=fixed, lam=np.exp(logLam), velscale_ratio=velscale_ratio,
                              component=component_step12, dust=dust_step12)
+
             goodPixels_preclip = goodPixels
             noise_orig = np.mean(log_bin_error[goodPixels_step0])
+
             noise_est = robust_sigma(
                 pp_step1.galaxy[goodPixels_step0] - pp_step1.bestfit[goodPixels_step0])
+
             snr_Resid1 = np.nanmedian(pp_step1.galaxy[goodPixels_step0] / noise_est)
+
             noise_new = log_bin_error * (noise_est / noise_orig)
             noise_new_std = robust_sigma(noise_new)
             noise_new[np.where(noise_new <= noise_est - noise_new_std)] = noise_est
 
-            # Step 2: 3-sigma clip
             mask0 = logLam > 0
             mask0[:] = False
             mask0[goodPixels] = True
             mask = mask0.copy()
+
             if doclean == True:
                 mask = clip_outliers(log_bin_data, pp_step1.bestfit, mask)
                 mask &= mask0
 
-            # Step 3: science fit for age and metallicity at fixed alpha
             pp = ppxf(templates_alpha, log_bin_data, noise_new, velscale, start,
                        mask=mask, plot=False, quiet=True, moments=nmoments, degree=-1,
                        vsyst=offset, mdegree=mdeg, regul=regul, fixed=fixed,
                        lam=np.exp(logLam), velscale_ratio=velscale_ratio,
                        component=component_step6, dust=dust_step6)
 
-        # Step 4: identify surviving (age, metallicity) grid points
         weights_alpha = pp.weights.reshape(templates_alpha.shape[1:]) / pp.weights.sum()
         survive_age_idx, survive_met_idx = np.where(weights_alpha > 0)
         n_survive = len(survive_age_idx)
 
-        # Step 5: rebuild multi-alpha templates at surviving (age, met) points
-        # (templates_mgb_lib is already convolved to sigma_min and cropped to the
-        # Mgb window -- see extractStarFormationHistories)
-
-        # Step 6: convolve galaxy from (LSF_Data + sigma_kin) to sigma_max so all
-        # bins are compared at the same resolution with consistent Mgb bandpass.
-        # Bins where sigma_kin > sigma_max are flagged (MGB_RES_FLAG=1).
         wave_gal_full = np.exp(logLam)
         sigma_kin_fwhm = pp.sol[1] * wave_gal_full / C * 2.355
+
         native_fwhm_gal = np.sqrt(lsf_data_full**2 + sigma_kin_fwhm**2)
         target_fwhm_gal = np.sqrt(lsf_data_full**2 +
                                    (sigma_max * wave_gal_full / C * 2.355)**2)
+
         sigma_pix_gal, flag_gal = resolution_sigma_pix(
             wave_gal_full, native_fwhm_gal, target_fwhm_gal, velscale)
+
         galaxy_conv = gaussian_filter1d(log_bin_data, sigma_pix_gal)
-        noise_conv  = gaussian_filter1d(noise_new,    sigma_pix_gal)
+        noise_conv  = gaussian_filter1d(noise_new, sigma_pix_gal)
         mgb_res_flag = int(np.any(flag_gal))
 
-        # Step 7: pseudo-continuum normalisation over b1-b6, extract b3-b4 pixels.
-        # Deredshift the galaxy wavelength array per bin so that rest-frame band
-        # boundaries b1..b6 align correctly with the galaxy features.
-        z_bin = pp.sol[0] / C  # V from _kin.fits is the galaxy recession velocity directly
+        z_bin = pp.sol[0] / C
         wave_gal_rest = wave_gal_full / (1.0 + z_bin)
+
         log_bin_data_b1b6 = galaxy_conv[idx_gal_mgb]
         noise_b1b6        = noise_conv[idx_gal_mgb]
-        wave_b1b6         = wave_gal_rest[idx_gal_mgb]  # rest-frame wavelengths
+        wave_b1b6         = wave_gal_rest[idx_gal_mgb]
 
         gal_norm, noise_norm, cont_gal = normalize_pseudocont(
             wave_b1b6, log_bin_data_b1b6, b1, b2, b5, b6, noise=noise_b1b6)
 
-        # Use the fixed common wavelength grid for b3-b4 (computed from mean
-        # redshift in extractStarFormationHistories) to ensure consistent
-        # array sizes across bins despite per-bin deredshift variation.
-        wave_fif  = wave_gal_rest[idx_gal_b3b4]   # fixed grid, npix_b3b4 pixels
+        wave_fif  = wave_gal_rest[idx_gal_b3b4]
         n_pix_fif = len(wave_fif)
+
         gal_fif   = np.interp(wave_fif, wave_b1b6, gal_norm)
         noise_fif = np.abs(np.interp(wave_fif, wave_b1b6, noise_norm))
 
-        # Step 8: build per-alpha model FIF vectors and run EMCEE
-        # For each alpha, sum templates weighted by the step-3 age/met weights,
-        # normalise by pseudo-continuum, interpolate to the galaxy pixel grid.
         idx_b3b4_temp = (wave_temp_mgb >= b3) & (wave_temp_mgb <= b4)
-        wave_b3b4_temp = wave_temp_mgb[idx_b3b4_temp]
 
         model_fif = np.zeros((nAlpha, n_pix_fif))
+
         for a_idx in range(nAlpha):
+
             model_spec_a = np.zeros(len(wave_temp_mgb))
+
             for k in range(n_survive):
                 w = weights_alpha[survive_age_idx[k], survive_met_idx[k]]
                 model_spec_a += w * templates_mgb_lib[:, survive_age_idx[k],
-                                                         survive_met_idx[k], a_idx]
-            model_norm_a, _ = normalize_pseudocont(wave_temp_mgb, model_spec_a, b1, b2, b5, b6)
+                                                       survive_met_idx[k], a_idx]
+
+            model_norm_a, _ = normalize_pseudocont(
+                wave_temp_mgb, model_spec_a, b1, b2, b5, b6)
+
+            model_spec_a_aligned = np.interp(
+                wave_temp_mgb,
+                wave_fif,
+                np.interp(wave_fif, wave_temp_mgb, model_spec_a)
+            )
+
+            model_norm_a, _ = normalize_pseudocont(
+                wave_temp_mgb,
+                model_spec_a_aligned,
+                b1, b2, b5, b6
+            )
+
             model_fif[a_idx, :] = np.interp(
-                wave_fif, wave_b3b4_temp, model_norm_a[idx_b3b4_temp])
+                wave_fif,
+                wave_temp_mgb,
+                model_norm_a
+            )
 
-        # Templates are pre-convolved to LSF_Data + sigma_max in
-        # extractStarFormationHistories. No per-bin model convolution needed.
-
-        # 1-D EMCEE over alpha; each b3-b4 pixel is an independent observable
-        # (Martin-Navarro et al. 2019, Eq. 3). Model is linearly interpolated
-        # across the alpha grid using np.interp (avoids Delaunay for 1-D case).
         alpha_fif, alpha_fif_lo, alpha_fif_hi = run_fif_emcee_1d(
             gal_fif, noise_fif, model_fif, alpha_values,
             config["SFH"]["ALPHA_FIX"], nwalkers_fif, nchain_fif)
 
-        # populate w_row: step-3 age/met weights at the nearest alpha grid point
         alpha_idx_fif = find_nearest_index(alpha_values, alpha_fif)
+
         w_full = np.zeros((nAges, nMetal, nAlpha))
         for k in range(n_survive):
             w_full[survive_age_idx[k], survive_met_idx[k], alpha_idx_fif] = \
                 weights_alpha[survive_age_idx[k], survive_met_idx[k]]
+
         w_row = np.array([np.reshape(w_full, ncomb)])
 
         best_model_fif  = model_fif[alpha_idx_fif, :]
         spectral_mask_fif = np.ones(n_pix_fif)
 
-        # full-range (step 3) diagnostics
         goodPixels_full = pp.goodpixels
         noise_est_full  = robust_sigma(pp.galaxy[goodPixels_full] - pp.bestfit[goodPixels_full])
         snr_postfit     = np.nanmean(pp.galaxy[goodPixels_full] / noise_est_full)
@@ -589,14 +586,15 @@ def run_ppxf(
                                          + "_sfh_bin_" + str(i) + "_step1.pdf"),
                            snrCubevar=snr_prefit, snrResid=snr_Resid1)
 
-            # weighted mean age and metallicity from step-3 weights
             alpha_fix_idx = find_nearest_index(alpha_values, config["SFH"]["ALPHA_FIX"])
             mean_age_step3 = np.sum(weights_alpha * 10**logAge_grid[:, :, alpha_fix_idx]) / np.sum(weights_alpha)
             mean_met_step3 = np.sum(weights_alpha * metal_grid[:, :, alpha_fix_idx]) / np.sum(weights_alpha)
+
             mean_results_step3 = np.array([[mean_age_step3, mean_met_step3]])
 
             if fixed is not None:
                 pp.sol[0:nmoments] = start
+
             plot_ppxf_sfh(pp, np.exp(logLam), i,
                            os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
                                          + "_sfh_bin_" + str(i) + "_step3.pdf"),
@@ -615,25 +613,22 @@ def run_ppxf(
             pp.sol[:],
             w_row,
             best_model_fif,
-            formal_error,
+            pp.error * np.sqrt(pp.chi2),
             spectral_mask_fif,
-            snr_postfit,
+            np.nan,
             pp.chi2,
-            EBV,
+            EBV_init,
             alpha_fif,
             alpha_fif_lo,
             alpha_fif_hi,
             n_survive,
-            mgb_res_flag,
+            0,
             gal_fif,
         )
 
     except Exception as e:
-        import traceback
-        logging.warning(f"run_ppxf failed for bin {i}: {e}\n{traceback.format_exc()}")
-        print(f"ERROR in run_ppxf bin {i}: {e}", flush=True)
-        return (np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
-                np.nan, np.nan, np.nan, np.nan, 0, 0, np.nan)
+        logging.warning(str(e))
+        return tuple([np.nan] * 14)
 
 
 def mean_agemetalalpha(w_row, ageGrid, metalGrid, alphaGrid, nbins):
@@ -904,7 +899,6 @@ def extractStarFormationHistories(config):
     if config["SFH"]["MC_PPXF"] > 0:
         logging.warning("SFH.MC_PPXF > 0 is not implemented for ppxf_sfh_wrapper_fif; ignoring.")
 
-    # Implementation of switch FIXED
     if config["SFH"]["FIXED"] == True:
         logging.info("Stellar kinematics are FIXED to the results obtained before.")
         if config["SFH"]["MOM"] != config["KIN"]["MOM"]:
@@ -1087,6 +1081,8 @@ def extractStarFormationHistories(config):
             Parallel(**parallel_configs)(delayed(worker)(ch) for ch in chunks),
             total=len(chunks), desc="Processing chunks", ascii=" #", unit="chunk"))
         ppxf_tmp = [r for ch in ppxf_tmp for r in ch]
+        assert len(ppxf_tmp) == nbins
+        assert all(len(r) == 14 for r in ppxf_tmp)
 
         for ii in range(nbins):
             _unpack(ii, ppxf_tmp[ii])
