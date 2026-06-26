@@ -696,8 +696,8 @@ def run_ppxf(
         import traceback
         logging.warning(f"run_ppxf failed for bin {i}: {e}\n{traceback.format_exc()}")
         print(f"ERROR in run_ppxf bin {i}: {e}", flush=True)
-        return (np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
-                np.nan, np.nan, np.nan, np.nan, 0, 0, np.nan)
+        return (np.nan, np.nan, np.nan, np.nan, np.nan,
+                np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 0, 0, np.nan)
 
 
 def mean_agemetalalpha(w_row, ageGrid, metalGrid, alphaGrid, nbins):
@@ -860,8 +860,6 @@ def extractStarFormationHistories(config):
     A template grid at fixed alpha/Fe is used for the pPXF age/metallicity
     fit. The [alpha/Fe] is then determined by FIF of the Mgb feature using
     the EMCEE sampler. See module docstring for the full algorithm.
-    Args:
-    - config: dictionary containing configuration parameters
     """
 
     # Read LSF information
@@ -879,247 +877,205 @@ def extractStarFormationHistories(config):
         logAge_grid, metal_grid, alpha_grid, ncomb, nAges, nMetal, nAlpha,
     ) = _prepareTemplates.prepareTemplates_Module(
         config, config["SFH"]["LMIN"], config["SFH"]["LMAX"],
-        velscale / velscale_ratio, LSF_Data, LSF_Templates, 'SFH', sortInGrid=True)
+        velscale / velscale_ratio, LSF_Data, LSF_Templates, 'SFH',
+        sortInGrid=True)
 
-    # check that template wavelength range is larger than the fitting range
     if (lamRange_temp[0] >= config["SFH"]["LMIN"]) or (lamRange_temp[1] <= config["SFH"]["LMAX"]):
         logging.info("Template wavelength range needs to be larger than fitting range, exiting")
         printStatus.warning("Template wavelength range needs to be larger than fitting range, exiting")
         return
 
-    # Full template grid -- no alpha fixing
     alpha_values = alpha_grid[0, 0, :]
 
-    # Mgb band definition from the LS line-list file
     b1, b2, b3, b4, b5, b6 = get_mgb_band(config)
     mgb_bands = (b1, b2, b3, b4, b5, b6)
 
-    # Define file paths
     gas_cleaned_file = (os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
                         + '_gas_cleaned_' + config["GAS"]["LEVEL"].lower() + '.fits')
     bin_spectra_file = (os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
                         + "_bin_spectra.hdf5")
 
     if (config["SFH"]["SPEC_EMICLEAN"] == True) and os.path.isfile(gas_cleaned_file):
-        logging.info(f"Using emission-subtracted spectra at {gas_cleaned_file}")
-        printStatus.done("Using emission-subtracted spectra")
         with fits.open(gas_cleaned_file, mem_map=True) as hdul:
-            logLam  = hdul[2].data["LOGLAM"]
-            idx_lam = np.where(np.logical_and(np.exp(logLam) > config["SFH"]["LMIN"],
-                                               np.exp(logLam) < config["SFH"]["LMAX"]))[0]
+            logLam = hdul[2].data["LOGLAM"]
+            idx_lam = np.where((np.exp(logLam) > config["SFH"]["LMIN"]) &
+                               (np.exp(logLam) < config["SFH"]["LMAX"]))[0]
             bin_data = hdul[1].data["SPEC"].T[idx_lam, :]
             bin_err  = hdul[1].data["ESPEC"].T[idx_lam, :]
             logLam   = logLam[idx_lam]
     else:
-        logging.info(f"Using regular spectra without any emission-correction at {bin_spectra_file}")
-        printStatus.done("Using regular spectra without any emission-correction")
         with h5py.File(bin_spectra_file, 'r') as f:
-            logLam  = f["LOGLAM"][:]
-            idx_lam = np.where(np.logical_and(np.exp(logLam) > config["SFH"]["LMIN"],
-                                               np.exp(logLam) < config["SFH"]["LMAX"]))[0]
+            logLam = f["LOGLAM"][:]
+            idx_lam = np.where((np.exp(logLam) > config["SFH"]["LMIN"]) &
+                               (np.exp(logLam) < config["SFH"]["LMAX"]))[0]
             bin_data = f["SPEC"][idx_lam, :]
             bin_err  = f["ESPEC"][idx_lam, :]
             logLam   = logLam[idx_lam]
 
-    nbins  = bin_data.shape[1]
-    npix   = bin_data.shape[0]
+    nbins = bin_data.shape[1]
+    npix  = bin_data.shape[0]
 
     wave_gal_full = np.exp(logLam)
     lsf_data_full = LSF_Data(wave_gal_full)
     offset = (logLam_template[0] - logLam[0]) * C
 
-    # galaxy wavelength indices for the Mgb window and b3-b4 central bandpass.
-    # Use the mean systemic velocity to deredshift before comparing to rest-frame
-    # band boundaries -- per-bin deredshift is then applied inside run_ppxf.
+    # mean velocity for Mgb indexing
     if config["SFH"]["FIXED"] == True:
-        V_all = np.array(fits.open(
-            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_kin.fits", mem_map=True)[1].data.V[:])
-        valid_V = V_all[np.array(fits.open(
-            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_kin.fits", mem_map=True)[1].data.SIGMA[:]) > 0]
+        kin_file = fits.open(os.path.join(config["GENERAL"]["OUTPUT"],
+                                           config["GENERAL"]["RUN_ID"]) + "_kin.fits",
+                             mem_map=True)[1].data
+        V_all = np.array(kin_file.V)
+        SIG_all = np.array(kin_file.SIGMA)
+        valid_V = V_all[SIG_all > 0]
         mean_V = float(np.nanmean(valid_V)) if len(valid_V) > 0 else 0.0
     else:
         mean_V = 0.0
-    z_mean = mean_V / C  # V from _kin.fits is the galaxy recession velocity directly
+
+    z_mean = mean_V / C
     wave_gal_rest_mean = wave_gal_full / (1.0 + z_mean)
+
     idx_gal_mgb  = np.where((wave_gal_rest_mean >= b1) & (wave_gal_rest_mean <= b6))[0]
     idx_gal_b3b4 = np.where((wave_gal_rest_mean >= b3) & (wave_gal_rest_mean <= b4))[0]
-    npix_b3b4    = len(idx_gal_b3b4)
-    logLam_b3b4  = logLam[idx_gal_b3b4]
 
-    if config["SFH"]["NOISE"] == 'variance':
-        noise = bin_err
-    elif config["SFH"]["NOISE"] == 'constant':
-        noise = np.ones((npix, nbins))
-        med_bin_err = np.nanmedian(bin_err, axis=0)
-        noise *= med_bin_err
+    npix_b3b4   = len(idx_gal_b3b4)
+    logLam_b3b4 = logLam[idx_gal_b3b4]
 
-    if config["SFH"]["MC_PPXF"] > 0:
-        logging.warning("SFH.MC_PPXF > 0 is not implemented for ppxf_sfh_wrapper_fif; ignoring.")
+    spectral_mask_all = np.zeros((nbins, npix_b3b4))
 
-    # Implementation of switch FIXED
-    if config["SFH"]["FIXED"] == True:
-        logging.info("Stellar kinematics are FIXED to the results obtained before.")
-        if config["SFH"]["MOM"] != config["KIN"]["MOM"]:
-            printStatus.running("Moments not the same in KIN and SFH module")
-            printStatus.running("Ignoring SFH MOMENTS, using KIN MOMENTS")
+    noise = bin_err if config["SFH"]["NOISE"] == "variance" else np.ones_like(bin_err)
+
+    if config["SFH"]["NOISE"] == "constant":
+        noise *= np.nanmedian(bin_err, axis=0)
+
+    # kinematics setup
+    if config["SFH"]["FIXED"]:
         fixed = [True] * config["KIN"]["MOM"]
+        ppxf_data = fits.open(os.path.join(config["GENERAL"]["OUTPUT"],
+                                           config["GENERAL"]["RUN_ID"]) + "_kin.fits",
+                              mem_map=True)[1].data
 
-        ppxf_data = fits.open(
-            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_kin.fits", mem_map=True)[1].data
         start = np.zeros((nbins, config["KIN"]["MOM"]))
         for i in range(nbins):
-            start[i, :] = np.array(ppxf_data[i][: config["KIN"]["MOM"]])
+            start[i, :] = np.array(ppxf_data[i][:config["KIN"]["MOM"]])
 
-        # sigma_max: maximum measured velocity dispersion -- common convolution
-        # target so all bins see the same effective Mgb bandpass.
-        sigma_kin_all = np.array(ppxf_data.SIGMA[:])
+        sigma_kin_all = np.array(ppxf_data.SIGMA)
         valid_sigma = sigma_kin_all[sigma_kin_all > 0]
-        if len(valid_sigma) > 0:
-            sigma_max = float(np.nanmax(valid_sigma))
-        else:
-            sigma_max = float(config["KIN"]["SIGMA"])
-            logging.warning(f"No valid sigma in _kin.fits; falling back to KIN.SIGMA = {sigma_max:.1f} km/s")
-        logging.info(f"FIF sigma_max = {sigma_max:.1f} km/s")
-        printStatus.running(f"FIF sigma_max = {sigma_max:.1f} km/s")
 
-    elif config["SFH"]["FIXED"] == False:
-        logging.info("Stellar kinematics are NOT FIXED.")
+        sigma_max = float(np.nanmax(valid_sigma)) if len(valid_sigma) > 0 else float(config["KIN"]["SIGMA"])
+    else:
         fixed = None
         start = np.zeros((nbins, config["SFH"]["MOM"]))
-        for i in range(nbins):
-            if config["SFH"]["MOM"] == 2:
-                start[i, :] = np.array([0.0, config["KIN"]["SIGMA"]])
-            elif config["SFH"]["MOM"] == 4:
-                start[i, :] = np.array([0.0, config["KIN"]["SIGMA"], 0.0, 0.0])
-            elif config["SFH"]["MOM"] == 6:
-                start[i, :] = np.array([0.0, config["KIN"]["SIGMA"], 0.0, 0.0, 0.0, 0.0])
         sigma_max = float(config["KIN"]["SIGMA"])
-        logging.warning(f"SFH.FIXED=False: sigma_max set to KIN.SIGMA = {sigma_max:.1f} km/s.")
 
-    # Convolve the full template grid to the sigma_min-equivalent FWHM:
-    # sqrt(LSF_Data^2 + (sigma_min * wave / C * 2.355)^2), evaluated at
-    # template wavelengths. This matches the resolution of the minimum-sigma
-    # data bin, following Martin-Navarro et al. 2019.
-    wave_temp_full   = np.exp(logLam_template)
-    lsf_data_at_temp = LSF_Data(wave_temp_full)
-    # Pre-convolve templates from native LSF_Templates to LSF_Data only.
-    # Kinematic broadening is applied per-bin inside run_ppxf.
-    native_fwhm_temp = LSF_Templates(wave_temp_full)
-    target_fwhm_temp = np.sqrt(lsf_data_at_temp**2 +
-                                (sigma_max * wave_temp_full / C * 2.355)**2)
-    sigma_pix_temp, flag_temp = resolution_sigma_pix(
-        wave_temp_full, native_fwhm_temp, target_fwhm_temp, velscale / velscale_ratio)
+    # template LSF convolution only
+    wave_temp_full = np.exp(logLam_template)
+    lsf_temp = LSF_Templates(wave_temp_full)
+    lsf_data = LSF_Data(wave_temp_full)
 
-    if np.any(flag_temp):
-        logging.warning("Template native resolution already exceeds data LSF at some wavelengths.")
+    sigma_pix_temp, _ = resolution_sigma_pix(
+        wave_temp_full, lsf_temp, lsf_data, velscale / velscale_ratio)
 
-    printStatus.running("Convolving templates to instrument LSF only (no sigma_max broadening)...")
-
-    wave_temp_full   = np.exp(logLam_template)
-    lsf_data_at_temp = LSF_Data(wave_temp_full)
-    native_fwhm_temp = LSF_Templates(wave_temp_full)
-
-    sigma_pix_temp, _ = resolution_sigma_pix(wave_temp_full, native_fwhm_temp, lsf_data_at_temp, velscale / velscale_ratio)
     templates_full_2d = templates_full.reshape(templates_full.shape[0], ncomb)
-    templates_full_lsf_2d = np.empty_like(templates_full_2d)
+    templates_full_lsf = np.empty_like(templates_full_2d)
 
     for k in range(ncomb):
-        templates_full_lsf_2d[:, k] = gaussian_filter1d(
-            templates_full_2d[:, k], sigma_pix_temp)
+        templates_full_lsf[:, k] = gaussian_filter1d(templates_full_2d[:, k], sigma_pix_temp)
 
-    templates_full_lsf = templates_full_lsf_2d.reshape(templates_full.shape)
-    idx_temp_mgb = np.where((wave_temp_full >= b1 - LAM_PAD) & (wave_temp_full <= b6 + LAM_PAD))[0]
+    templates_full_lsf = templates_full_lsf.reshape(templates_full.shape)
 
-    templates_mgb_lib_base = templates_full_lsf[idx_temp_mgb, :, :, :]
+    idx_temp_mgb = np.where((wave_temp_full >= b1 - LAM_PAD) &
+                            (wave_temp_full <= b6 + LAM_PAD))[0]
+
+    templates_mgb_lib = templates_full_lsf[idx_temp_mgb, :, :, :]
     wave_temp_mgb = wave_temp_full[idx_temp_mgb]
     logLam_template_mgb = logLam_template[idx_temp_mgb]
 
-    if 'SPEC_PREMASK' in config["SFH"]:
-        goodPixels_step0_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_PREMASK"], logLam)
-    else:
-        goodPixels_step0_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam)
+    goodPixels_step0_sfh = _auxiliary.spectralMasking(config,
+                               config["SFH"].get("SPEC_PREMASK", config["SFH"]["SPEC_MASK"]),
+                               logLam)
 
-    goodPixels_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam)
+    goodPixels_sfh = _auxiliary.spectralMasking(config,
+                         config["SFH"]["SPEC_MASK"], logLam)
 
     doplot = config["SFH"].get("PLOT", False)
 
-    sfh_cfg = config["SFH"]
-    if "REGUL" in sfh_cfg:
-        regul = sfh_cfg["REGUL"]
-    elif "REGUL_ERR" in sfh_cfg:
-        regul_err = sfh_cfg["REGUL_ERR"]
-        regul = 0.0 if regul_err == 0 else 1.0 / regul_err
-    else:
-        raise KeyError("Either SFH.REGUL or SFH.REGUL_ERR must be set")
+    regul = config["SFH"].get("REGUL", 0.0)
 
     nwalkers_fif = config["SFH"].get("FIF_NWALKERS", 32)
     nchain_fif   = config["SFH"].get("FIF_NCHAIN", 500)
     prior_sigma  = config["SFH"].get("FIF_PRIOR_SIGMA", 0.2)
 
-    # Output arrays
-    ppxf_result       = np.zeros((nbins, 6))
-    w_row             = np.zeros((nbins, ncomb))
-    bestfit_fif_all   = np.zeros((nbins, npix_b3b4))
-    bin_data_fif_all  = np.zeros((nbins, npix_b3b4))
-    formal_error      = np.zeros((nbins, 6))
-    spectral_mask_all = np.zeros((nbins, npix_b3b4))
-    snr_postfit       = np.zeros(nbins)
-    red_chi2          = np.zeros(nbins)
-    EBV               = np.zeros(nbins)
-    alpha_fif_arr     = np.zeros(nbins)
-    alpha_fif_lo_arr  = np.zeros(nbins)
-    alpha_fif_hi_arr  = np.zeros(nbins)
-    n_survivors       = np.zeros(nbins, dtype=int)
-    mgb_res_flag      = np.zeros(nbins, dtype=int)
+    # outputs
+    ppxf_result = np.zeros((nbins, 6))
+    w_row = np.zeros((nbins, ncomb))
+    bestfit_fif_all = np.zeros((nbins, npix_b3b4))
+    bin_data_fif_all = np.zeros((nbins, npix_b3b4))
+    formal_error = np.zeros((nbins, 6))
+    snr_postfit = np.zeros(nbins)
+    red_chi2 = np.zeros(nbins)
+    EBV = np.zeros(nbins)
+    alpha_fif_arr = np.zeros(nbins)
+    alpha_fif_lo_arr = np.zeros(nbins)
+    alpha_fif_hi_arr = np.zeros(nbins)
+    n_survivors = np.zeros(nbins, dtype=int)
+    mgb_res_flag = np.zeros(nbins, dtype=int)
 
-    if (config["SFH"]["OPT_TEMP"] == "galaxy_single") or (config["SFH"]["OPT_TEMP"] == "galaxy_set"):
-        comb_spec  = np.nanmean(bin_data[:, :], axis=1)
-        comb_espec = np.nanmean(bin_err[:, :], axis=1)
-        optimal_template_out, optimal_template_set = run_ppxf_firsttime(
-            templates_full.reshape(templates_full.shape[0], ncomb),
-            comb_spec, comb_espec, velscale, start[0, :],
-            goodPixels_step0_sfh, config["SFH"]["MOM"], offset, -1,
-            config["SFH"]["MDEG"], regul, velscale_ratio, ncomb)
-        if config["SFH"]["OPT_TEMP"] == 'galaxy_single':
-            optimal_template_comb = optimal_template_out
-        if config["SFH"]["OPT_TEMP"] == 'galaxy_set':
-            optimal_template_comb = optimal_template_set
-    else:
-        optimal_template_comb = templates_full.reshape(templates_full.shape[0], ncomb)
-
-    EBV_init   = 0.1
+    EBV_init = 0.1
     start_time = time.time()
 
+    # wrapper
     def _call(ii):
         return run_ppxf(
-            templates_full, bin_data[:, ii], noise[:, ii],
-            velscale, start[ii, :], goodPixels_step0_sfh, goodPixels_sfh,
-            config["SFH"]["MOM"], offset, -1, config["SFH"]["MDEG"],
-            regul, config["SFH"]["DOCLEAN"], fixed, velscale_ratio,
-            npix, ncomb, nAges, nMetal, nAlpha, nbins, ii,
-            optimal_template_comb, EBV_init, logLam,
-            logAge_grid, metal_grid, alpha_grid, config, doplot,
-            templates_mgb_lib, templates_mgb_lib_base, wave_temp_mgb, idx_gal_mgb, idx_gal_b3b4, lsf_data_full,
-            sigma_max, mgb_bands, nwalkers_fif, nchain_fif, prior_sigma, alpha_values)
+            templates_full,
+            bin_data[:, ii],
+            noise[:, ii],
+            velscale,
+            start[ii, :],
+            goodPixels_step0_sfh,
+            goodPixels_sfh,
+            config["SFH"]["MOM"],
+            offset,
+            -1,
+            config["SFH"]["MDEG"],
+            regul,
+            config["SFH"]["DOCLEAN"],
+            fixed,
+            velscale_ratio,
+            npix,
+            ncomb,
+            nAges,
+            nMetal,
+            nAlpha,
+            nbins,
+            ii,
+            templates_mgb_lib,
+            templates_mgb_lib,
+            wave_temp_mgb,
+            idx_gal_mgb,
+            idx_gal_b3b4,
+            lsf_data_full,
+            sigma_max,
+            mgb_bands,
+            nwalkers_fif,
+            nchain_fif,
+            prior_sigma,
+            alpha_values)
 
     def _unpack(ii, res):
-        ppxf_result[ii, :config["SFH"]["MOM"]] = res[0]
-        w_row[ii, :]             = res[1]
-        bestfit_fif_all[ii, :]   = res[2]
-        formal_error[ii, :config["SFH"]["MOM"]] = res[3]
+        ppxf_result[ii, :] = res[0]
+        w_row[ii, :] = res[1]
+        bestfit_fif_all[ii, :] = res[2]
+        formal_error[ii, :] = res[3]
         spectral_mask_all[ii, :] = res[4]
-        snr_postfit[ii]          = res[5]
-        red_chi2[ii]             = res[6]
-        EBV[ii]                  = res[7]
-        alpha_fif_arr[ii]        = res[8]
-        alpha_fif_lo_arr[ii]     = res[9]
-        alpha_fif_hi_arr[ii]     = res[10]
-        n_survivors[ii]          = res[11]
-        mgb_res_flag[ii]         = res[12]
-        bin_data_fif_all[ii, :]  = res[13]
+        snr_postfit[ii] = res[5]
+        red_chi2[ii] = res[6]
+        EBV[ii] = res[7]
+        alpha_fif_arr[ii] = res[8]
+        alpha_fif_lo_arr[ii] = res[9]
+        alpha_fif_hi_arr[ii] = res[10]
+        n_survivors[ii] = res[11]
+        mgb_res_flag[ii] = res[12]
+        bin_data_fif_all[ii, :] = res[13]
 
     if config["GENERAL"]["PARALLEL"] == True:
         printStatus.running("Running pPXF+FIF in parallel mode")
@@ -1127,31 +1083,54 @@ def extractStarFormationHistories(config):
 
         memmap_folder = "/scratch" if os.access("/scratch", os.W_OK) else config["GENERAL"]["OUTPUT"]
 
-        tm_mm = memmap_folder + "/templates_mgb_lib_memmap.tmp"
-        dump(templates_mgb_lib, tm_mm); templates_mgb_lib = load(tm_mm, mmap_mode='r')
-        bd_mm = memmap_folder + "/bin_data_memmap.tmp"
-        dump(bin_data, bd_mm); bin_data = load(bd_mm, mmap_mode='r')
-        no_mm = memmap_folder + "/noise_memmap.tmp"
-        dump(noise, no_mm); noise = load(no_mm, mmap_mode='r')
+        tm_mm = os.path.join(memmap_folder, "templates_mgb_lib_memmap.dat")
+        bd_mm = os.path.join(memmap_folder, "bin_data_memmap.dat")
+        no_mm = os.path.join(memmap_folder, "noise_memmap.dat")
+        dump(templates_mgb_lib, tm_mm)
+        dump(bin_data, bd_mm)
+        dump(noise, no_mm)
+
+        templates_mgb_lib = load(tm_mm, mmap_mode='r')
+        bin_data = load(bd_mm, mmap_mode='r')
+        noise = load(no_mm, mmap_mode='r')
+
+        parallel_configs = {
+            "n_jobs": config["GENERAL"]["NCPU"],
+            "max_nbytes": "1M",
+            "temp_folder": memmap_folder,
+            "mmap_mode": "r"
+        }
 
         def worker(chunk):
             return [_call(ii) for ii in chunk]
 
         chunk_size = max(1, nbins // (config["GENERAL"]["NCPU"] * 10))
-        chunks = [range(ii, min(ii + chunk_size, nbins)) for ii in range(0, nbins, chunk_size)]
-        parallel_configs = {"n_jobs": config["GENERAL"]["NCPU"], "max_nbytes": "1M",
-                             "temp_folder": memmap_folder, "mmap_mode": "c",
-                             "return_as": "generator"}
+        chunks = [
+            range(ii, min(ii + chunk_size, nbins))
+            for ii in range(0, nbins, chunk_size)
+        ]
+
         ppxf_tmp = list(tqdm(
-            Parallel(**parallel_configs)(delayed(worker)(ch) for ch in chunks),
-            total=len(chunks), desc="Processing chunks", ascii=" #", unit="chunk"))
+            Parallel(**parallel_configs)(
+                delayed(worker)(ch) for ch in chunks
+            ),
+            total=len(chunks),
+            desc="Processing chunks",
+            ascii=" #",
+            unit="chunk"
+        ))
+
+        # flatten results
         ppxf_tmp = [r for ch in ppxf_tmp for r in ch]
 
         for ii in range(nbins):
             _unpack(ii, ppxf_tmp[ii])
 
+        # cleanup memmap files
         for f in [tm_mm, bd_mm, no_mm]:
-            os.remove(f)
+            if os.path.exists(f):
+                os.remove(f)
+
         printStatus.updateDone("Running pPXF+FIF in parallel mode", progressbar=False)
 
     if config["GENERAL"]["PARALLEL"] == False:
