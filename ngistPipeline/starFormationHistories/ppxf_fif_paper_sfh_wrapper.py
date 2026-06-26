@@ -303,60 +303,64 @@ def run_ppxf_firsttime(templates, log_bin_data, log_bin_error, velscale, start,
     return optimal_template, optimal_template_set
 
 
-def run_fif_emcee_1d(data, error, model_fif, alpha_values, alpha_centre,
-                      prior_sigma, nwalkers, nchain):
-    """
-    1-D EMCEE fit for [alpha/Fe] from FIF pixel data.
-    model_fif has shape (nAlpha, n_pix); interpolation is linear via np.interp.
-    A Gaussian prior centred on alpha_centre with width prior_sigma is applied,
-    following Martin-Navarro et al. 2019 who use the pPXF mean alpha as the
-    prior centre. Returns (median_alpha, err_lo, err_hi).
-    """
+def run_fif_emcee_1d(data, error, model_fif, alpha_values, alpha_fix, nwalkers, nchain):
+
     alpha_min = alpha_values[0]
     alpha_max = alpha_values[-1]
 
+    from scipy.interpolate import interp1d
+
+    model_interp = interp1d(
+        alpha_values,
+        model_fif,
+        axis=0,
+        bounds_error=False,
+        fill_value=(model_fif[0], model_fif[-1])
+    )
+
+    good = (error > 0) & np.isfinite(error) & np.isfinite(data)
+
+    inv_sigma2 = np.zeros_like(error)
+    inv_sigma2[good] = 1.0 / error[good]**2
+
     def lnprob(par):
         alpha = par[0]
-        if not (alpha_min <= alpha <= alpha_max):
-            return -np.inf
-        # Gaussian prior centred on pPXF mean alpha
-        lnprior = -0.5 * ((alpha - alpha_centre) / prior_sigma) ** 2
-        # interpolate model FIF vector at this alpha (vectorised over pixels)
-        idx = np.searchsorted(alpha_values, alpha)
-        idx = np.clip(idx, 1, len(alpha_values) - 1)
-        t = (alpha - alpha_values[idx - 1]) / (alpha_values[idx] - alpha_values[idx - 1])
-        model_at_alpha = (1.0 - t) * model_fif[idx - 1, :] + t * model_fif[idx, :]
-        good = (error > 0) & np.isfinite(error) & np.isfinite(data)
-        if np.sum(good) == 0:
-            return -np.inf
-        inv_sigma2 = 1.0 / error[good]**2
-        lnlike = -0.5 * np.sum((data[good] - model_at_alpha[good])**2 * inv_sigma2
-                                - np.log(inv_sigma2))
-        return (lnprior + lnlike) if np.isfinite(lnlike) else -np.inf
 
-    # initialise walkers around alpha_centre (pPXF mean alpha)
-    p0 = [[alpha_centre + 0.02 * np.random.randn()] for _ in range(nwalkers)]
+        if alpha < alpha_min or alpha > alpha_max:
+            return -1e300
+
+        model_at_alpha = model_interp(alpha)
+
+        resid = data - model_at_alpha
+
+        lnlike = -0.5 * np.sum(
+            resid[good]**2 * inv_sigma2[good]
+            + np.log(error[good]**2)
+        )
+
+        return lnlike
+
+    p0 = [[alpha_fix + 0.02 * np.random.randn()] for _ in range(nwalkers)]
     p0 = [[np.clip(p[0], alpha_min, alpha_max)] for p in p0]
 
     sampler = emcee.EnsembleSampler(nwalkers, 1, lnprob)
     sampler.run_mcmc(p0, nchain, progress=False)
 
     try:
-        tau    = sampler.get_autocorr_time()
+        tau = sampler.get_autocorr_time()
         burnin = int(2 * np.max(tau))
-        thin   = max(1, int(0.5 * np.min(tau)))
+        thin = max(1, int(0.5 * np.min(tau)))
     except emcee.autocorr.AutocorrError:
         burnin = int(0.3 * nchain)
-        thin   = 1
+        thin = 1
 
-    if burnin >= nchain:
-        burnin = int(0.3 * nchain)
+    burnin = min(burnin, int(0.3 * nchain))
 
     flat = sampler.get_chain(discard=burnin, thin=thin, flat=True)[:, 0]
 
-    median   = np.percentile(flat, 50)
-    err_lo   = np.percentile(flat, 16) - median
-    err_hi   = np.percentile(flat, 84) - median
+    median = np.percentile(flat, 50)
+    err_lo = np.percentile(flat, 16) - median
+    err_hi = np.percentile(flat, 84) - median
 
     return median, err_lo, err_hi
 
@@ -393,6 +397,7 @@ def run_ppxf(
     config,
     doplot,
     templates_mgb_lib,
+    templates_mgb_lib_base,
     wave_temp_mgb,
     idx_gal_mgb,
     idx_gal_b3b4,
@@ -555,16 +560,63 @@ def run_ppxf(
         wave_b3b4_temp = wave_temp_mgb[idx_b3b4_temp]
 
         model_fif = np.zeros((nAlpha, n_pix_fif))
-        for a_idx in range(nAlpha):
-            model_spec_a = np.zeros(len(wave_temp_mgb))
-            for k in range(n_survive):
-                w = weights_age_met[survive_age_idx[k], survive_met_idx[k]]
-                model_spec_a += w * templates_mgb_lib[:, survive_age_idx[k],
-                                                         survive_met_idx[k], a_idx]
-            model_norm_a, _ = normalize_pseudocont(wave_temp_mgb, model_spec_a, b1, b2, b5, b6)
-            model_fif[a_idx, :] = np.interp(
-                wave_fif, wave_b3b4_temp, model_norm_a[idx_b3b4_temp])
 
+        # normalise weights over surviving (age, met) subset
+        w_survive = weights_age_met[survive_age_idx, survive_met_idx]
+        w_survive = w_survive / np.sum(w_survive)
+
+        sigma_kin = pp.sol[1]
+
+        native_fwhm_bin = np.sqrt(
+            lsf_data_full[idx_gal_mgb]**2 +
+            (sigma_kin * wave_gal_full[idx_gal_mgb] / C * 2.355)**2
+        )
+
+        target_fwhm_bin = np.sqrt(
+            lsf_data_full[idx_gal_mgb]**2 +
+            (sigma_max * wave_gal_full[idx_gal_mgb] / C * 2.355)**2
+        )
+
+        sigma_pix_bin, _ = resolution_sigma_pix(
+            wave_temp_mgb,
+            lsf_data_full[idx_gal_mgb],
+            target_fwhm_bin,
+            velscale / velscale_ratio
+        )
+
+        templates_mgb_lib_local = templates_mgb_lib_base.copy()
+
+        for k in range(ncomb):
+            templates_mgb_lib_local[:, k] = gaussian_filter1d(
+                templates_mgb_lib_local[:, k],
+                sigma_pix_bin
+            )
+
+        for a_idx in range(nAlpha):
+
+            model_spec_a = np.zeros(len(wave_temp_mgb))
+
+            for k in range(n_survive):
+                ia = survive_age_idx[k]
+                im = survive_met_idx[k]
+
+                template_idx = ia * nMetal * nAlpha + im * nAlpha + a_idx
+
+                model_spec_a += w_survive[k] * templates_mgb_lib_local[:, template_idx]
+
+            model_norm_a, _ = normalize_pseudocont(
+                wave_temp_mgb,
+                model_spec_a,
+                b1, b2, b5, b6
+            )
+
+            model_fif[a_idx, :] = np.interp(
+                wave_fif,
+                wave_b3b4_temp,
+                model_norm_a[idx_b3b4_temp],
+                left=np.nan,
+                right=np.nan
+            )
         # Templates are pre-convolved to LSF_Data + sigma_max in
         # extractStarFormationHistories. No per-bin model convolution needed.
 
@@ -964,20 +1016,25 @@ def extractStarFormationHistories(config):
     if np.any(flag_temp):
         logging.warning("Template native resolution already exceeds data LSF at some wavelengths.")
 
-    printStatus.running(f"Convolving {ncomb} templates to sigma_max = {sigma_max:.1f} km/s...")
-    templates_full_2d      = templates_full.reshape(templates_full.shape[0], ncomb)
-    templates_full_conv_2d = np.empty_like(templates_full_2d)
-    for k in range(ncomb):
-        templates_full_conv_2d[:, k] = gaussian_filter1d(templates_full_2d[:, k], sigma_pix_temp)
-    templates_full_conv = templates_full_conv_2d.reshape(templates_full.shape)
-    printStatus.updateDone(f"Convolving {ncomb} templates to sigma_max = {sigma_max:.1f} km/s",
-                            progressbar=False)
+    printStatus.running("Convolving templates to instrument LSF only (no sigma_max broadening)...")
 
-    # crop to the Mgb window (padded to cover pseudo-continuum sidebands)
-    idx_temp_mgb      = np.where((wave_temp_full >= b1 - LAM_PAD) &
-                                  (wave_temp_full <= b6 + LAM_PAD))[0]
-    templates_mgb_lib = templates_full_conv[idx_temp_mgb, :, :, :]
-    wave_temp_mgb     = wave_temp_full[idx_temp_mgb]
+    wave_temp_full   = np.exp(logLam_template)
+    lsf_data_at_temp = LSF_Data(wave_temp_full)
+    native_fwhm_temp = LSF_Templates(wave_temp_full)
+
+    sigma_pix_temp, _ = resolution_sigma_pix(wave_temp_full, native_fwhm_temp, lsf_data_at_temp, velscale / velscale_ratio)
+    templates_full_2d = templates_full.reshape(templates_full.shape[0], ncomb)
+    templates_full_lsf_2d = np.empty_like(templates_full_2d)
+
+    for k in range(ncomb):
+        templates_full_lsf_2d[:, k] = gaussian_filter1d(
+            templates_full_2d[:, k], sigma_pix_temp)
+
+    templates_full_lsf = templates_full_lsf_2d.reshape(templates_full.shape)
+    idx_temp_mgb = np.where((wave_temp_full >= b1 - LAM_PAD) & (wave_temp_full <= b6 + LAM_PAD))[0]
+
+    templates_mgb_lib_base = templates_full_lsf[idx_temp_mgb, :, :, :]
+    wave_temp_mgb = wave_temp_full[idx_temp_mgb]
     logLam_template_mgb = logLam_template[idx_temp_mgb]
 
     if 'SPEC_PREMASK' in config["SFH"]:
@@ -1045,7 +1102,7 @@ def extractStarFormationHistories(config):
             npix, ncomb, nAges, nMetal, nAlpha, nbins, ii,
             optimal_template_comb, EBV_init, logLam,
             logAge_grid, metal_grid, alpha_grid, config, doplot,
-            templates_mgb_lib, wave_temp_mgb, idx_gal_mgb, idx_gal_b3b4, lsf_data_full,
+            templates_mgb_lib, templates_mgb_lib_base, wave_temp_mgb, idx_gal_mgb, idx_gal_b3b4, lsf_data_full,
             sigma_max, mgb_bands, nwalkers_fif, nchain_fif, prior_sigma, alpha_values)
 
     def _unpack(ii, res):
@@ -1070,8 +1127,6 @@ def extractStarFormationHistories(config):
 
         memmap_folder = "/scratch" if os.access("/scratch", os.W_OK) else config["GENERAL"]["OUTPUT"]
 
-        ta_mm = memmap_folder + "/templates_alpha_memmap.tmp"
-        dump(templates_alpha, ta_mm); templates_alpha = load(ta_mm, mmap_mode='r')
         tm_mm = memmap_folder + "/templates_mgb_lib_memmap.tmp"
         dump(templates_mgb_lib, tm_mm); templates_mgb_lib = load(tm_mm, mmap_mode='r')
         bd_mm = memmap_folder + "/bin_data_memmap.tmp"
@@ -1095,7 +1150,7 @@ def extractStarFormationHistories(config):
         for ii in range(nbins):
             _unpack(ii, ppxf_tmp[ii])
 
-        for f in [ta_mm, tm_mm, bd_mm, no_mm]:
+        for f in [tm_mm, bd_mm, no_mm]:
             os.remove(f)
         printStatus.updateDone("Running pPXF+FIF in parallel mode", progressbar=False)
 
