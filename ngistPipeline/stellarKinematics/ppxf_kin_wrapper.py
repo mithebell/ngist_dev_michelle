@@ -927,15 +927,14 @@ def extractStellarKinematics(config):
         for i in range(0, nbins):
             ppxf_result[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][0]
             ppxf_bestfit[i, :] = ppxf_tmp[i][1]
-            optimal_template_comb[i, :] = ppxf_tmp[i][2]
-            mc_results[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][3]
-            formal_error[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][4]
-            spectral_mask[i, :] = ppxf_tmp[i][5]
-            snr_postfit[i] = ppxf_tmp[i][6]
-            red_chi2[i] = ppxf_tmp[i][7]
-            EBV[i] = ppxf_tmp[i][8]
-            mpoly[i, :] = ppxf_tmp[i][9]
-            apoly[i, :] = ppxf_tmp[i][10]
+            mc_results[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][2]
+            formal_error[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][3]
+            spectral_mask[i, :] = ppxf_tmp[i][4]
+            snr_postfit[i] = ppxf_tmp[i][5]
+            red_chi2[i] = ppxf_tmp[i][6]
+            EBV[i] = ppxf_tmp[i][7]
+            mpoly[i, :] = ppxf_tmp[i][8]
+            apoly[i, :] = ppxf_tmp[i][9]
         
         printStatus.updateDone("Running PPXF in parallel mode", progressbar=False)
 
