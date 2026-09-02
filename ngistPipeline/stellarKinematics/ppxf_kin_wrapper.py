@@ -927,7 +927,7 @@ def extractStellarKinematics(config):
         for i in range(0, nbins):
             ppxf_result[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][0]
             ppxf_bestfit[i, :] = ppxf_tmp[i][1]
-            optimal_template[i, :] = ppxf_tmp[i][2]
+            optimal_template_comb[i, :] = ppxf_tmp[i][2]
             mc_results[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][3]
             formal_error[i, : config["KIN"]["MOM"]] = ppxf_tmp[i][4]
             spectral_mask[i, :] = ppxf_tmp[i][5]
