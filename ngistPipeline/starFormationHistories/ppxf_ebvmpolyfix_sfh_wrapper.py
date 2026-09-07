@@ -32,12 +32,15 @@ C = 299792.458  # speed of light in km/s
 PURPOSE:
   This module performs the extraction of non-parametric star-formation histories
   by full-spectral fitting. It extends ppxf_sfh_wrapper by running Steps 0-3
-  identically over the full wavelength range (LMIN_TOT/LMAX_TOT) to obtain EBV
-  and MPOLY, then runs Step 4 over the science range (LMIN/LMAX) with EBV and
-  MPOLY fixed from the full-range fit.
+  over the wavelength range LMIN_DUSTMPOLY/LMAX_DUSTMPOLY (falling back to
+  LMIN/LMAX if not given) to obtain EBV and MPOLY, then runs Step 4 over the
+  science range (LMIN/LMAX) with EBV and MPOLY fixed from that fit. Templates
+  and data are prepared over the full range (LMIN_TOT/LMAX_TOT) throughout, so
+  that Step 4 has template coverage beyond the science range for velocity
+  shifts.
 
-  When LMIN=LMIN_TOT and LMAX=LMAX_TOT, EBV and MPOLY are identical to
-  ppxf_sfh_wrapper by construction.
+  When LMIN_DUSTMPOLY=LMIN_TOT and LMAX_DUSTMPOLY=LMAX_TOT, EBV and MPOLY are
+  fit over the full range, identical to earlier versions of this wrapper.
 """
 def plot_ppxf_sfh(pp ,x, i,outfig_ppxf, snrCubevar=-99, snrResid=-99, goodpixelsPre=[], 
                   norm=False,mean_results=''):
@@ -233,7 +236,6 @@ def run_ppxf(
     goodPixels_step0,
     goodPixels,
     nmoments,
-    offset,
     degree,
     mdeg,
     regul,
@@ -249,6 +251,7 @@ def run_ppxf(
     logLam,
     nsims,
     idx_lam_sfh,
+    idx_lam_dustmpoly,
     logLam_full,
     logLam_template,
     logAge_grid,
@@ -264,15 +267,28 @@ def run_ppxf(
     ui.adsabs.harvard.edu/?#abs/2017MNRAS.466..798C), in order to determine the
     non-parametric star-formation histories.
 
-    Steps 0-3 are identical to ppxf_sfh_wrapper and run over the full wavelength
-    range (LMIN_TOT/LMAX_TOT). Step 4 then crops to the science range (LMIN/LMAX)
-    and re-fits weights with EBV and MPOLY fixed from the full-range fit.
+    Steps 0-3 crop the data to the wavelength range given by idx_lam_dustmpoly
+    (LMIN_DUSTMPOLY/LMAX_DUSTMPOLY, falling back to LMIN/LMAX when not
+    configured) and fit EBV and MPOLY there — a real crop of the arrays passed
+    to ppxf (mirroring Step 4's crop to the science range), not just a
+    goodpixels/mask restriction, so the polynomial's normalisation domain is
+    genuinely LMIN_DUSTMPOLY/LMAX_DUSTMPOLY. Step 4 then crops to the science
+    range (LMIN/LMAX) and re-fits weights with EBV and MPOLY fixed from the
+    Step 0-3 fit. Templates and full-range data are still loaded/prepared over
+    LMIN_TOT/LMAX_TOT beforehand, since Step 4 needs template coverage beyond
+    the science range for velocity shifts; LMIN_DUSTMPOLY/LMAX_DUSTMPOLY must
+    cover LMIN/LMAX so Step 4 can crop the Step 0-3 mask and MPOLY down to it.
+
+    When LMIN_DUSTMPOLY=LMIN_TOT and LMAX_DUSTMPOLY=LMAX_TOT, EBV and MPOLY
+    are fit over the full range, identical to earlier versions of this
+    wrapper.
     """
 
     try:
         if len(optimal_template_in) > 1:
 
-            # Normalise galaxy spectra and noise
+            # Normalise galaxy spectra and noise (full TOT-range arrays —
+            # kept around for Step 4's separate crop to the science range)
             median_log_bin_data = np.nanmedian(log_bin_data)
             log_bin_error = log_bin_error / median_log_bin_data
             log_bin_data = log_bin_data / median_log_bin_data
@@ -280,14 +296,39 @@ def run_ppxf(
             # Calculate SNR before the fit from flux and flux_err
             snr_prefit = np.nanmedian(log_bin_data/log_bin_error)
 
+            # Crop the data actually fit in Steps 0-3 to the wavelength range
+            # LMIN_DUSTMPOLY/LMAX_DUSTMPOLY (falling back to LMIN/LMAX). This
+            # mirrors how Step 4 crops to the science range: it's a real crop
+            # of the arrays passed to ppxf, not just a goodpixels/mask
+            # restriction, so the polynomial's normalisation domain in Steps
+            # 0-3 is genuinely LMIN_DUSTMPOLY/LMAX_DUSTMPOLY rather than the
+            # full TOT range.
+            logLam_dustmpoly        = logLam[idx_lam_dustmpoly]
+            log_bin_data_dustmpoly  = log_bin_data[idx_lam_dustmpoly]
+            log_bin_error_dustmpoly = log_bin_error[idx_lam_dustmpoly]
+
+            # The velocity offset (vsyst) depends on where the data's first
+            # pixel sits relative to the template's first pixel, so it must
+            # be recomputed for the cropped grid.
+            offset_dustmpoly = (logLam_template[0] - logLam_dustmpoly[0]) * C
+
+            # Re-index goodpixels (defined over the full TOT-range array)
+            # into local positions within the cropped dust/mpoly array.
+            goodPixels_step0_local = np.searchsorted(
+                idx_lam_dustmpoly, np.intersect1d(goodPixels_step0, idx_lam_dustmpoly)
+            )
+            goodPixels_local = np.searchsorted(
+                idx_lam_dustmpoly, np.intersect1d(goodPixels, idx_lam_dustmpoly)
+            )
+
             ################ 0 ##################
-            # Step 0: estimate dust E(B-V) over full range, no polynomials
+            # Step 0: estimate dust E(B-V) over the dust/mpoly range, no polynomials
             component_step0 = [0] * np.prod(optimal_template_in.shape[1:])
             component_true_step0 = np.array(component_step0) == 0
             dust = [{"start": [EBV_init], "bounds": [[0, 8]], "component": component_true_step0}]
 
-            pp_step0 = ppxf(optimal_template_in, log_bin_data, log_bin_error, velscale, lam=np.exp(logLam),
-                            goodpixels=goodPixels_step0, degree=-1, mdegree=-1, vsyst=offset,
+            pp_step0 = ppxf(optimal_template_in, log_bin_data_dustmpoly, log_bin_error_dustmpoly, velscale, lam=np.exp(logLam_dustmpoly),
+                            goodpixels=goodPixels_step0_local, degree=-1, mdegree=-1, vsyst=offset_dustmpoly,
                             velscale_ratio=velscale_ratio, moments=nmoments, start=start, plot=False,
                             dust=dust, component=component_step0, regul=0, quiet=True)
 
@@ -332,24 +373,24 @@ def run_ppxf(
                 dust_step3 = None
 
             ################ 1 ##################
-            # Step 1: fake noise fit over full range to estimate noise
-            fake_noise=np.full_like(log_bin_data, 1.0)
+            # Step 1: fake noise fit over the dust/mpoly range to estimate noise
+            fake_noise=np.full_like(log_bin_data_dustmpoly, 1.0)
 
             pp_step1 = ppxf(
                 optimal_template_in,
-                log_bin_data,
+                log_bin_data_dustmpoly,
                 fake_noise,
                 velscale,
                 start,
-                goodpixels=goodPixels_step0,
+                goodpixels=goodPixels_step0_local,
                 plot=False,
                 quiet=True,
                 moments=nmoments,
                 degree=-1,
-                vsyst=offset,
+                vsyst=offset_dustmpoly,
                 mdegree=mdeg,
                 fixed=fixed,
-                lam=np.exp(logLam),
+                lam=np.exp(logLam_dustmpoly),
                 velscale_ratio=velscale_ratio,
                 component=component_step12,
                 dust=dust_step12,
@@ -357,13 +398,15 @@ def run_ppxf(
 
             goodPixels_preclip = goodPixels
             # Find a proper estimate of the noise
-            noise_orig = np.mean(log_bin_error[goodPixels_step0])
+            noise_orig = np.mean(log_bin_error_dustmpoly[goodPixels_step0_local])
             noise_est = robust_sigma(
-                pp_step1.galaxy[goodPixels_step0]-pp_step1.bestfit[goodPixels_step0])
+                pp_step1.galaxy[goodPixels_step0_local]-pp_step1.bestfit[goodPixels_step0_local])
 
             # Calculate SNR postfit
-            snr_Resid1 = np.nanmedian(pp_step1.galaxy[goodPixels_step0]/noise_est)
-            # Calculate the new noise, and the sigma of the distribution.
+            snr_Resid1 = np.nanmedian(pp_step1.galaxy[goodPixels_step0_local]/noise_est)
+            # Calculate the new noise, and the sigma of the distribution. This
+            # is a scalar rescale of the *full* TOT-range noise array, so it
+            # remains valid outside the dust/mpoly crop too (needed for Step 4).
             noise_new = log_bin_error*(noise_est/noise_orig)
             noise_new_std = robust_sigma(noise_new)
 
@@ -371,24 +414,26 @@ def run_ppxf(
             noise_new[np.where(noise_new <= noise_est-noise_new_std)] = noise_est
 
             ################ 2 ##################
-            # Step 2: clip outliers over full range
-            mask0 = logLam > 0
-            mask0[:] = False
-            mask0[goodPixels] = True
+            # Step 2: clip outliers over the dust/mpoly range (mask built at
+            # the cropped array's length)
+            mask0 = np.zeros(len(idx_lam_dustmpoly), dtype=bool)
+            mask0[goodPixels_local] = True
             mask = mask0.copy()
 
             if doclean == True:
-                mask = clip_outliers(log_bin_data, pp_step1.bestfit, mask)
+                mask = clip_outliers(log_bin_data_dustmpoly, pp_step1.bestfit, mask)
                 mask &= mask0
 
             ################ 3 ##################
-            # Step 3: full-range fit with full templates — identical to ppxf_sfh_wrapper Step 3.
-            # Gives EBV (from Step 0) and MPOLY over LMIN_TOT/LMAX_TOT.
-            # Weights are discarded; only mpoly_full is kept.
+            # Step 3: fit with full templates, cropped to the dust/mpoly
+            # range — identical to ppxf_sfh_wrapper Step 3 when that range
+            # covers the full data range. Gives EBV (from Step 0) and MPOLY
+            # fixed over LMIN_DUSTMPOLY/LMAX_DUSTMPOLY. Weights are discarded;
+            # only pp_step3.mpolyweights (the Legendre coefficients) is kept.
             pp_step3 = ppxf(
                 templates,
-                log_bin_data,
-                noise_new,
+                log_bin_data_dustmpoly,
+                noise_new[idx_lam_dustmpoly],
                 velscale,
                 start,
                 mask=mask,
@@ -396,44 +441,58 @@ def run_ppxf(
                 quiet=True,
                 moments=nmoments,
                 degree=-1,
-                vsyst=offset,
+                vsyst=offset_dustmpoly,
                 mdegree=mdeg,
                 regul=regul,
                 fixed=fixed,
-                lam=np.exp(logLam),
+                lam=np.exp(logLam_dustmpoly),
                 velscale_ratio=velscale_ratio,
                 component=component_step3,
                 dust=dust_step3,
             )
 
-            mpoly_full = pp_step3.mpoly if pp_step3.mpoly is not None else np.ones(len(log_bin_data))
-
             ################ 4 ##################
-            # Step 4: crop to science range (LMIN/LMAX), apply full-range MPOLY by multiplying into the templates.
+            # Step 4: crop to science range (LMIN/LMAX), apply the MPOLY fixed
+            # in Step 3 (over the dust/mpoly range) by multiplying into the templates.
+            #
+            # mask is defined over the dust/mpoly-cropped grid
+            # (idx_lam_dustmpoly), not the full TOT-range grid, so it must be
+            # re-indexed via idx_sfh_local rather than idx_lam_sfh.
+            # extractStarFormationHistories() guarantees LMIN_DUSTMPOLY/
+            # LMAX_DUSTMPOLY covers LMIN/LMAX, so idx_lam_sfh is always a
+            # subset of idx_lam_dustmpoly here.
+            idx_sfh_local = np.searchsorted(idx_lam_dustmpoly, idx_lam_sfh)
+
             log_bin_data_sfh  = log_bin_data[idx_lam_sfh]
             noise_new_sfh     = noise_new[idx_lam_sfh]
             logLam_sfh        = logLam_full[idx_lam_sfh]
-            mask_sfh          = mask[idx_lam_sfh]
-            mpoly_sfh         = mpoly_full[idx_lam_sfh]
+            mask_sfh          = mask[idx_sfh_local]
 
-            # Reconstruct MPOLY exactly on the template pixel grid using the
-            # Legendre polynomial coefficients stored in pp_step3.mpolyweights.
-            # This avoids interpolation and gives the exact MPOLY values at every
-            # template pixel. The full uncropped templates are used so that after
-            # pPXF's internal wavelength-overlap crop they still extend beyond the
-            # science range and satisfy the length assertion.
+            # Reconstruct MPOLY exactly on the template pixel grid, and at the
+            # science-range wavelengths, using the Legendre polynomial
+            # coefficients stored in pp_step3.mpolyweights. This avoids
+            # interpolation and gives exact values at every pixel. The full
+            # uncropped templates are used so that after pPXF's internal
+            # wavelength-overlap crop they still extend beyond the science
+            # range and satisfy the length assertion.
             from numpy.polynomial import legendre
-
-            # Map logLam_template to [-1, 1] over the full data wavelength range
-            # — the same normalisation pPXF uses internally for Step 3.
-            x_temp = 2*(logLam_template - logLam[0])/(logLam[-1] - logLam[0]) - 1
 
             # pPXF stores Legendre coefficients starting from degree 1 in mpolyweights.
             # MPOLY = 1 + sum(c_k * L_k(x)) for k=1..mdeg
             coeffs = np.zeros(mdeg + 1)
             coeffs[0] = 1.0  # constant term (degree 0)
             coeffs[1:] = pp_step3.mpolyweights  # degrees 1..mdeg
+
+            # Map wavelengths to [-1, 1] over the dust/mpoly-cropped range
+            # (LMIN_DUSTMPOLY/LMAX_DUSTMPOLY) — the same normalisation pPXF
+            # used internally for Step 3, since that's the actual lam array
+            # Step 3 was fit over.
+            x_temp = 2*(logLam_template - logLam_dustmpoly[0])/(logLam_dustmpoly[-1] - logLam_dustmpoly[0]) - 1
             mpoly_on_temp_grid = legendre.legval(x_temp, coeffs)
+
+            # MPOLY evaluated at the science-range data wavelengths, saved for output.
+            x_sfh = 2*(logLam_sfh - logLam_dustmpoly[0])/(logLam_dustmpoly[-1] - logLam_dustmpoly[0]) - 1
+            mpoly_sfh = legendre.legval(x_sfh, coeffs)
 
             templates_mpoly = templates * mpoly_on_temp_grid.reshape(-1, *([1]*(templates.ndim-1)))
 
@@ -495,8 +554,8 @@ def run_ppxf(
             if fixed != None:
                 pp.sol[0:nmoments] = start
 
-            # Plot Step 1 over full range
-            tmp_plot1 = plot_ppxf_sfh(pp_step1, np.exp(logLam), i, outfigFile_step1,
+            # Plot Step 1 over the dust/mpoly range it was actually fit on
+            tmp_plot1 = plot_ppxf_sfh(pp_step1, np.exp(logLam_dustmpoly), i, outfigFile_step1,
                                       snrCubevar=snr_prefit, snrResid=snr_Resid1)
 
             # Plot Step 4 over science range.
@@ -571,7 +630,7 @@ def run_ppxf(
         # Restore median normalisation only.
         pp.bestfit = pp.bestfit * median_log_bin_data
 
-        # MPOLY saved is the full-range poly sliced to the science range
+        # MPOLY saved is the Step 3 Legendre poly evaluated at the science-range wavelengths
         mpoly = mpoly_sfh
 
         # Compute bestfit_full: LOSVD-convolved weighted template sum with dust,
@@ -863,10 +922,13 @@ def extractStarFormationHistories(config):
     """
     Starts the computation of non-parametric star-formation histories with pPXF.
 
-    Templates are prepared over the full range (LMIN_TOT/LMAX_TOT). Steps 0-3
-    run over the full range (identical to ppxf_sfh_wrapper) to obtain EBV and
-    MPOLY. Step 4 then crops to the science range (LMIN/LMAX) and re-fits
-    weights with EBV and MPOLY fixed.
+    Templates and data are prepared/loaded over the full range (LMIN_TOT/
+    LMAX_TOT), since Step 4 needs template coverage beyond the science range
+    for velocity shifts. Steps 0-3 are then restricted to the wavelength range
+    LMIN_DUSTMPOLY/LMAX_DUSTMPOLY (config["SFH"]) to obtain EBV and MPOLY. If
+    LMIN_DUSTMPOLY/LMAX_DUSTMPOLY are not given, they default to LMIN/LMAX.
+    Step 4 then crops to the science range (LMIN/LMAX) and re-fits weights
+    with EBV and MPOLY fixed.
 
     Args:
     - config: dictionary containing configuration parameters
@@ -974,6 +1036,25 @@ def extractStarFormationHistories(config):
         np.exp(logLam_full) < config["SFH"]["LMAX"]
     ))[0]
     npix_sfh = len(idx_lam_sfh)
+
+    # Wavelength range over which EBV/MPOLY are fixed in Steps 0-3, before
+    # cropping to the science range in Step 4. Falls back to LMIN/LMAX when
+    # LMIN_DUSTMPOLY/LMAX_DUSTMPOLY are not given, for backwards compatibility.
+    lmin_dustmpoly = config["SFH"].get("LMIN_DUSTMPOLY", config["SFH"]["LMIN"])
+    lmax_dustmpoly = config["SFH"].get("LMAX_DUSTMPOLY", config["SFH"]["LMAX"])
+
+    idx_lam_dustmpoly = np.where(np.logical_and(
+        np.exp(logLam_full) > lmin_dustmpoly,
+        np.exp(logLam_full) < lmax_dustmpoly
+    ))[0]
+
+    # The dust/mpoly range must cover the science range, since Step 4 crops
+    # the mask and MPOLY computed over LMIN_DUSTMPOLY/LMAX_DUSTMPOLY down to
+    # LMIN/LMAX.
+    if lmin_dustmpoly > config["SFH"]["LMIN"] or lmax_dustmpoly < config["SFH"]["LMAX"]:
+        logging.info("LMIN_DUSTMPOLY/LMAX_DUSTMPOLY does not cover science range LMIN/LMAX, exiting")
+        printStatus.warning("LMIN_DUSTMPOLY/LMAX_DUSTMPOLY does not cover science range LMIN/LMAX, exiting")
+        return
 
     # Define additional variables
     nbins = bin_data.shape[1]
@@ -1133,7 +1214,6 @@ def extractStarFormationHistories(config):
                     goodPixels_step0_sfh,
                     goodPixels_sfh,
                     config["SFH"]["MOM"],
-                    offset,
                     -1,
                     config["SFH"]["MDEG"],
                     regul,
@@ -1149,6 +1229,7 @@ def extractStarFormationHistories(config):
                     logLam,
                     config["SFH"]["MC_PPXF"],
                     idx_lam_sfh,
+                    idx_lam_dustmpoly,
                     logLam_full,
                     logLam_template,
                     logAge_grid,
@@ -1225,7 +1306,6 @@ def extractStarFormationHistories(config):
                 goodPixels_step0_sfh,
                 goodPixels_sfh,
                 config["SFH"]["MOM"],
-                offset,
                 -1,
                 config["SFH"]["MDEG"],
                 regul,
@@ -1241,6 +1321,7 @@ def extractStarFormationHistories(config):
                 logLam,
                 config["SFH"]["MC_PPXF"],
                 idx_lam_sfh,
+                idx_lam_dustmpoly,
                 logLam_full,
                 logLam_template,
                 logAge_grid,
