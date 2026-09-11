@@ -92,9 +92,18 @@ def prepareSpectralTemplateLibrary(config, lmin, lmax, velscale, LSF_Data, LSF_T
     cvel  = 299792.458
 
     # SSP model library
-    sp_models = glob.glob(os.path.join(config['GENERAL']['TEMPLATE_DIR'],config[module_used]["LIBRARY"]) + \
-#                          'ssp_final_mistv2.5_c3kv2.3vt10allfal_250722.fits')
-                           'ssp_final_mistv2.5_c3kv2.3vt10allfal_250722_nGIST_geckos.fits')
+    sp_models = glob.glob(os.path.join(config['GENERAL']['TEMPLATE_DIR'], config[module_used]["LIBRARY"], 'ssp_final_mistv2.5_c3kv2.3vt10allfal_highres_*.fits'))
+
+    if len(sp_models) == 0:
+        message = "alphaMC template file not found in " + os.path.join(config['GENERAL']['TEMPLATE_DIR'], config[module_used]["LIBRARY"])
+        printStatus.failed(message)
+        logging.critical(message)
+        exit(1)
+    if len(sp_models) > 1:
+        message = "Multiple alphaMC template files found: " + str(sp_models)
+        printStatus.failed(message)
+        logging.critical(message)
+        exit(1)
 
     ssp_conroy = fits.open(sp_models[0])
     wave = ssp_conroy[0].data
