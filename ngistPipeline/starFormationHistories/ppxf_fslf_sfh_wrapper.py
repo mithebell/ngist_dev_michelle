@@ -19,20 +19,10 @@ from ngistPipeline.prepareTemplates import _prepareTemplates
 import warnings
 warnings.filterwarnings("ignore")
 
-# Physical constants
+# Toggles and physical constants
 C = 299792.458  # speed of light in km/s
-
-# SFH science window -- covers Mgb, Fe5270, and Fe5335
-SFH_LMIN = 5100.0
-SFH_LMAX = 5400.0
-
-# Fixed alpha/Fe value used for the Steps 0-3 age/metallicity fit
-ALPHA_FIX = 0.20
-
-# Hardcoded testing toggles
+ALPHA_FIX = 0.20 # fixed [alpha/fe] value used for the Steps 0-3 age/metallicity fit
 USE_STEP3_PRIOR = True # multiplies the templates by its weight
-
-SFH_METHOD_HISTORY = "SFH derived via alpha=0.20 and mgb focused fitting"
 
 """
 PURPOSE:
@@ -45,11 +35,13 @@ PURPOSE:
   Algorithm per bin:
     Steps 0-3: pPXF at fixed alpha/Fe (ALPHA_FIX = 0.20, snapped to nearest
                grid value) for age and metallicity, over the LMIN/LMAX
-               fitting range, with an EBV prefit (Step 0), noise rescaling
-               (Step 1), and 3-sigma clipping (Step 2). Step 3 is fit with
-               regularisation (fixed SFH.REGUL / SFH.REGUL_ERR from config)
-               to select the surviving (age, met) grid points.
-    Step 6:    Identify the literal non-zero weight (age, metallicity) grid
+               fitting range -- identical in form to ppxf_sfh_wrapper.py's
+               Steps 1-4: noise rescaling (Step 0), 3-sigma clipping
+               (Step 1), a dust-only EBV fit (Step 2, no polynomials), and a
+               regularised re-fit (fixed SFH.REGUL / SFH.REGUL_ERR from
+               config) to select the surviving (age, met) grid points
+               (Step 3).
+    Step 4:    Identify the literal non-zero weight (age, metallicity) grid
                points from the Step-3 fit (no bounding box -- may be a
                scattered/non-rectangular subset); rebuild a reduced template
                array at exactly those (age, met) survivor points, crossed
@@ -58,18 +50,24 @@ PURPOSE:
                template stack is pre-scaled by its (normalized) Step-3
                weight, biasing the fit toward the Step-3 proportions; and
                fit this reduced (n_survive x nAlpha) template basis to the
-               galaxy data in the fixed SFH window (5100-5400 Ang, covering
-               Mgb + Fe5270 + Fe5335, always -- not configurable), masked by
+               galaxy data cropped to the SFH.SPEC_FSLF window, masked by
                the originally-imported spectral mask (SFH.SPEC_MASK,
-               cropped to the SFH window -- not the Step 1-2 3-sigma clip
-               mask), with dust/EBV fixed to the Step-0 value, mdegree=-1,
-               regul=0 (never regularised here), linear=True. Kinematics may
-               be fixed or free, controlled by SFH.FIXED as in the other
-               wrappers.
-    Step 7:    Scatter the reduced-grid weights back onto the full native
-               (nAges, nMetal, nAlpha) grid (zero outside the survivor set)
-               for output/compatibility with the other wrappers' FITS
-               structure and mean_agemetalalpha().
+               cropped to the SFH.SPEC_FSLF window -- not the Step 0-1
+               3-sigma clip mask), with dust/EBV fixed to the Step-2 value,
+               mdegree=-1, regul=0 (never regularised here), linear=True.
+               Kinematics may be fixed or free, controlled by SFH.FIXED as
+               in the other wrappers.
+    Step 5:    Build the saved (nAges, nMetal, nAlpha) WEIGHTS cube: each
+               survivor cell's total mass is fixed to its Step-3 value
+               (age/metallicity marginal, from the longer LMIN/LMAX
+               baseline), redistributed across the alpha axis using the
+               *shape* of that cell's Step-4 weights (alpha, from the
+               shorter, alpha-sensitive SPEC_FSLF window). Zero outside the
+               survivor set. This gives the cube the same
+               (nAges, nMetal, nAlpha), mass-fraction-summing-to-1 format
+               as ppxf_sfh_wrapper.py's WEIGHTS output, for compatibility
+               with the other wrappers' FITS structure and
+               mean_agemetalalpha().
 """
 
 
@@ -285,6 +283,7 @@ def run_ppxf(
     velscale,
     start,
     goodPixels_step0,
+    goodPixels_dust,
     goodPixels,
     nmoments,
     offset,
@@ -316,17 +315,22 @@ def run_ppxf(
     doplot,
 ):
     """
-    Steps 0-2 run at fixed alpha/Fe (templates_alpha instead of the full
-    multi-alpha grid) over the LMIN/LMAX fitting range: an EBV prefit
-    (Step 0), a fake-noise fit to rescale the noise vector (Step 1), and
-    3-sigma clipping (Step 2). Step 3 re-fits at fixed alpha/Fe with
-    regularisation (`regul`, fixed from SFH.REGUL/SFH.REGUL_ERR) to select
-    the literal non-zero-weight (age, met) survivors. Step 6 rebuilds a reduced (n_survive x nAlpha)
-    template basis from templates_full at those survivor points (optionally
-    pre-scaled by the Step-3 survivor weights as a prior, see
-    USE_STEP3_PRIOR). Step 6 fits that reduced basis, unregularised, to the
-    data cropped to the fixed Mgb window (5150-5200 Ang), with EBV fixed
-    from Step 0.
+    Steps 0-3 mirror ppxf_sfh_wrapper.py's Steps 1-4 exactly, just run at
+    fixed alpha/Fe (templates_alpha instead of the full multi-alpha grid)
+    over the LMIN/LMAX fitting range: a fake-noise fit to rescale the noise
+    vector (Step 0), 3-sigma clipping (Step 1), a dust-only EBV fit masked
+    by the clip mask combined with goodPixels_dust (from SFH.SPEC_DUSTMASK
+    if set) with no polynomials (Step 2), and a regularised re-fit
+    (`regul`, fixed from SFH.REGUL/SFH.REGUL_ERR) to select the literal
+    non-zero-weight (age, met) survivors, with EBV fixed from Step 2
+    (Step 3). Step 4 rebuilds a reduced (n_survive x nAlpha) template basis
+    from templates_full at those survivor points (optionally pre-scaled by
+    the Step-3 survivor weights as a prior, see USE_STEP3_PRIOR) and fits
+    that reduced basis, unregularised, to the data cropped to the
+    SFH.SPEC_FSLF window, with EBV fixed from Step 2. Step 5 then combines
+    the two: the returned WEIGHTS cube's (age, met) marginal is fixed to
+    the Step-3 value at each survivor cell, redistributed across alpha
+    using the shape of that cell's Step-4 weights.
     """
 
     try:
@@ -339,53 +343,11 @@ def run_ppxf(
             snr_prefit = np.nanmedian(log_bin_data / log_bin_error)
 
             ################ 0 ##################
-            # Step 0: estimate dust E(B-V) over full range, no polynomials
-            component_step0 = [0] * np.prod(optimal_template_in.shape[1:])
-            component_true_step0 = np.array(component_step0) == 0
-            dust = [{"start": [EBV_init], "bounds": [[0, 8]], "component": component_true_step0}]
-
-            pp_step0 = ppxf(optimal_template_in, log_bin_data, log_bin_error, velscale, lam=np.exp(logLam),
-                            goodpixels=goodPixels_step0, degree=-1, mdegree=-1, vsyst=offset,
-                            velscale_ratio=velscale_ratio, moments=nmoments, start=start, plot=False,
-                            dust=dust, component=component_step0, regul=0, quiet=True)
-
-            if config["SFH"]["OPT_TEMP"] == "default":
-
-                reshaped_templates_alpha = templates_alpha.reshape((templates_alpha.shape[0], ncomb_alpha))
-
-                normalized_weights_step0 = pp_step0.weights / np.sum(pp_step0.weights)
-                wNonzero_weights_step0 = np.where(normalized_weights_step0 > 0)[0]
-                nNonzero_weights_step0 = np.shape(wNonzero_weights_step0)[0]
-
-                optimal_template_set_step0 = np.zeros([reshaped_templates_alpha.shape[0], nNonzero_weights_step0])
-                for j in range(0, nNonzero_weights_step0):
-                    optimal_template_set_step0[:, j] = reshaped_templates_alpha[:, wNonzero_weights_step0[j]]
-
-                optimal_template_in = optimal_template_set_step0
-
-            Rv = 4.05
-            Av = pp_step0.dust[0]["sol"][0]
-            EBV = Av / Rv
-
-            component_step12 = [0] * (np.shape(optimal_template_in)[1])
-            component_true_step12 = np.array(component_step12) == 0
-            component_step3 = [0] * ncomb_alpha
-            component_true_step3 = np.array(component_step3) == 0
-
-            if config["SFH"]["DUST_CORR"] == True:
-                dust_step12 = [{"start": [Av], "bounds": [[0, 8]], "component": component_true_step12,
-                                          "fixed": [True]}]
-                dust_step3 = [{"start": [Av], "bounds": [[0, 8]], "component": component_true_step3,
-                         "fixed": [True]}]
-            else:
-                dust_step12 = None
-                dust_step3 = None
-
-            ################ 1 ##################
-            # Step 1: fake noise fit over full range to estimate noise
+            # Step 0: fake noise fit over full range to estimate noise.
+            # Identical in form to ppxf_sfh_wrapper.py's Step 1.
             fake_noise = np.full_like(log_bin_data, 1.0)
 
-            pp_step1 = ppxf(
+            pp_step0 = ppxf(
                 optimal_template_in,
                 log_bin_data,
                 fake_noise,
@@ -395,42 +357,93 @@ def run_ppxf(
                 plot=False,
                 quiet=True,
                 moments=nmoments,
-                degree=-1,
                 vsyst=offset,
+                degree=degree,
                 mdegree=mdeg,
+                regul=0,
                 fixed=fixed,
                 lam=np.exp(logLam),
                 velscale_ratio=velscale_ratio,
-                component=component_step12,
-                dust=dust_step12,
             )
 
             goodPixels_preclip = goodPixels
             noise_orig = np.mean(log_bin_error[goodPixels_step0])
             noise_est = robust_sigma(
-                pp_step1.galaxy[goodPixels_step0] - pp_step1.bestfit[goodPixels_step0])
+                pp_step0.galaxy[goodPixels_step0] - pp_step0.bestfit[goodPixels_step0])
 
-            snr_Resid1 = np.nanmedian(pp_step1.galaxy[goodPixels_step0] / noise_est)
+            snr_Resid1 = np.nanmedian(pp_step0.galaxy[goodPixels_step0] / noise_est)
             noise_new = log_bin_error * (noise_est / noise_orig)
             noise_new_std = robust_sigma(noise_new)
 
             noise_new[np.where(noise_new <= noise_est - noise_new_std)] = noise_est
 
-            ################ 2 ##################
-            # Step 2: clip outliers over full range
-            mask0 = logLam > 0
-            mask0[:] = False
+            ################ 1 ##################
+            # Step 1: clip outliers over full range. Identical in form to
+            # ppxf_sfh_wrapper.py's Step 2.
+            mask0 = np.zeros(len(logLam), dtype=bool)
             mask0[goodPixels] = True
             mask = mask0.copy()
 
             if doclean == True:
-                mask = clip_outliers(log_bin_data, pp_step1.bestfit, mask)
+                mask = clip_outliers(log_bin_data, pp_step0.bestfit, mask)
                 mask &= mask0
+
+            ################ 2 ##################
+            # Step 2: fit dust only, no polynomials allowed. Identical in
+            # form to ppxf_sfh_wrapper.py's Step 3: masked by the clip mask
+            # combined with the dust-specific mask (goodPixels_dust, from
+            # SFH.SPEC_DUSTMASK if set, else SFH.SPEC_MASK).
+            mask_dust = np.zeros_like(mask, dtype=bool)
+            mask_dust[goodPixels_dust] = True
+            mask_dust &= mask  # Keep only pixels good in both masks
+
+            Rv = 4.05
+            Av_init = Rv * EBV_init
+            component_step2 = [0] * np.prod(optimal_template_in.shape[1:])
+            component_true_step2 = np.array(component_step2) == 0
+            dust = [{"start": [Av_init], "bounds": [[0, 8]], "component": component_true_step2}]
+
+            pp_step2 = ppxf(
+                optimal_template_in,
+                log_bin_data,
+                noise_new,
+                velscale,
+                lam=np.exp(logLam),
+                mask=mask_dust,
+                degree=-1,
+                mdegree=-1,
+                regul=0,
+                fixed=fixed,
+                vsyst=offset,
+                velscale_ratio=velscale_ratio,
+                moments=nmoments,
+                start=start,
+                plot=False,
+                dust=dust,
+                component=component_step2,
+                quiet=True,
+            )
+
+            # Save dust values
+            Av = pp_step2.dust[0]["sol"][0]
+            EBV = Av / Rv
+
+            component_step3 = [0] * ncomb_alpha
+            component_true_step3 = np.array(component_step3) == 0
+
+            if config["SFH"]["DUST_CORR"] == True:
+                dust_step3 = [{"start": [Av], "bounds": [[0, 8]], "component": component_true_step3,
+                         "fixed": [True]}]
+            else:
+                dust_step3 = None
 
             ################ 3 ##################
             # Step 3: LMIN/LMAX-range fit at fixed alpha/Fe, regularised
             # (fixed SFH.REGUL / SFH.REGUL_ERR from config), used to select
-            # the surviving (age, met) grid points.
+            # the surviving (age, met) grid points. Same place/role as
+            # ppxf_sfh_wrapper.py's Step 4, restricted to templates_alpha
+            # (fixed alpha/Fe) since only the (age, met) survivors are
+            # selected here.
             pp_step3 = ppxf(
                 templates_alpha,
                 log_bin_data,
@@ -441,7 +454,7 @@ def run_ppxf(
                 plot=False,
                 quiet=True,
                 moments=nmoments,
-                degree=-1,
+                degree=degree,
                 vsyst=offset,
                 mdegree=mdeg,
                 regul=regul,
@@ -452,19 +465,18 @@ def run_ppxf(
                 dust=dust_step3,
             )
 
-            ################ 6 ##################
-            # Step 6: identify literal non-zero-weight (age, met) survivors
+            ################ 4 ##################
+            # Step 4: identify literal non-zero-weight (age, met) survivors
             # from the Step-3 fit; rebuild a reduced (n_survive x nAlpha)
             # template basis from templates_full at those survivor points
             # (if USE_STEP3_PRIOR, pre-scale each survivor's template stack
             # by its normalized Step-3 weight, biasing this fit toward the
             # Step-3 proportions; otherwise use the reduced basis
-            # unweighted); then crop to the fixed SFH window (5100-5400 Ang,
-            # Mgb + Fe5270 + Fe5335) and fit the reduced basis, masked by the
-            # originally-imported spectral mask (goodPixels_sfh_cropped,
-            # from SFH.SPEC_MASK, not the Step 1-2 3-sigma clip mask), with
-            # EBV fixed from Step 0, no polynomial (mdegree=-1), never
-            # regularised (regul=0).
+            # unweighted); then crop to the SFH.SPEC_FSLF window and fit the
+            # reduced basis, masked by the originally-imported spectral mask
+            # (goodPixels_sfh_cropped, from SFH.SPEC_MASK, not the Step 0-1
+            # 3-sigma clip mask), with EBV fixed from Step 2, no polynomial
+            # (mdegree=-1), never regularised (regul=0).
             weights_alpha = pp_step3.weights.reshape(nAges, nMetal) / pp_step3.weights.sum()
             survive_age_idx, survive_met_idx = np.where(weights_alpha > 0)
             n_survive = len(survive_age_idx)
@@ -535,10 +547,29 @@ def run_ppxf(
 
         formal_error = pp.error * np.sqrt(pp.chi2)
 
-        ################ 7 ##################
-        # Step 7: scatter reduced-grid weights back onto the full native
-        # (nAges, nMetal, nAlpha) grid, zero outside the survivor set.
-        w_reduced = pp.weights.reshape(n_survive, nAlpha) / pp.weights.sum()
+        ################ 5 ##################
+        # Step 5: build the (nAges, nMetal, nAlpha) mass-fraction cube saved
+        # to _sfh_weights.fits, combining the two wavelength baselines the
+        # method is built around: the (age, met) marginal at each survivor
+        # cell is fixed to its Step-3 value (survivor_weights, from the
+        # longer LMIN/LMAX baseline that constrains age/metallicity), while
+        # the *shape* of the distribution across alpha within that cell
+        # comes from Step 4 (the shorter, alpha-sensitive SPEC_FSLF window).
+        # This keeps the cube's (age, met) marginal (cube.sum(axis=2))
+        # identical to age_initial/metal_initial regardless of how Step 4
+        # happens to divide each cell's mass across alpha, while its alpha
+        # information still comes entirely from Step 4. If a survivor cell
+        # got zero weight from Step 4 across every alpha value (possible
+        # with the unregularised linear fit), its alpha shape falls back to
+        # uniform so that cell's Step-3 mass isn't silently dropped.
+        w_reduced_raw = pp.weights.reshape(n_survive, nAlpha)
+        row_sums = w_reduced_raw.sum(axis=1, keepdims=True)
+        alpha_shape = np.divide(
+            w_reduced_raw, row_sums,
+            out=np.full_like(w_reduced_raw, 1.0 / nAlpha),
+            where=row_sums > 0,
+        )
+        w_reduced = alpha_shape * survivor_weights[:, None]
         weights_full = np.zeros((nAges, nMetal, nAlpha))
         weights_full[survive_age_idx, survive_met_idx, :] = w_reduced
         w_row = np.array([np.reshape(weights_full, ncomb_full)])
@@ -550,27 +581,27 @@ def run_ppxf(
                 printStatus.running("Creating directory for pPXF figures:" + outfigDir)
                 os.mkdir(outfigDir)
 
-            outfigFile_step1 = (
+            outfigFile_step0 = (
                 os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
-                                + "_sfh_bin_" + str(i) + "_step1.pdf"))
+                                + "_sfh_bin_" + str(i) + "_step0.pdf"))
             outfigFile_step3 = (
                 os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
                                 + "_sfh_bin_" + str(i) + "_step3.pdf"))
-            outfigFile_step6 = (
+            outfigFile_step4 = (
                 os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
-                                + "_sfh_bin_" + str(i) + "_step6.pdf"))
+                                + "_sfh_bin_" + str(i) + "_step4.pdf"))
 
             # Step-3 mean results: age and metal only (2 columns) -- alpha is
             # fixed at ALPHA_FIX, not fitted, so plot_ppxf_sfh's alpha-text
             # branch (triggered only when shape[1] > 2) is skipped.
             mean_results_step3 = np.array([[age_initial, metal_initial]])
 
-            mean_results_step6 = mean_agemetalalpha(w_row, 10 ** logAge_grid, metal_grid, alpha_grid, 1)
+            mean_results_step4 = mean_agemetalalpha(w_row, 10 ** logAge_grid, metal_grid, alpha_grid, 1)
 
             if fixed != None:
                 pp.sol[0:nmoments] = start
 
-            tmp_plot1 = plot_ppxf_sfh(pp_step1, np.exp(logLam), i, outfigFile_step1,
+            tmp_plot0 = plot_ppxf_sfh(pp_step0, np.exp(logLam), i, outfigFile_step0,
                                       snrCubevar=snr_prefit, snrResid=snr_Resid1)
 
             tmp_plot3 = plot_ppxf_sfh(pp_step3, np.exp(logLam), i, outfigFile_step3,
@@ -578,9 +609,9 @@ def run_ppxf(
                                       goodpixelsPre=goodPixels_preclip,
                                       mean_results=mean_results_step3)
 
-            tmp_plot6 = plot_ppxf_sfh(pp, np.exp(logLam_sfh), i, outfigFile_step6,
+            tmp_plot4 = plot_ppxf_sfh(pp, np.exp(logLam_sfh), i, outfigFile_step4,
                                       snrCubevar=snr_prefit, snrResid=snr_postfit,
-                                      mean_results=mean_results_step6,
+                                      mean_results=mean_results_step4,
                                       figsize=(8, 5.0))
 
         pp.bestfit = pp.bestfit * median_log_bin_data
@@ -663,13 +694,15 @@ def save_sfh(
     outfits_sfh = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_sfh.fits"
     printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh.fits")
 
-    # AGE/METAL/ALPHA are the Step-6 (Mgb-focused, free alpha/Fe) results --
-    # the primary reported SFH. AGE_INITIAL/METAL_INITIAL/ALPHA_INITIAL are
-    # the Step-3 (LMIN/LMAX range, fixed alpha/Fe = ALPHA_FIX) results used
-    # to select the survivor set.
+    # AGE/METAL are the Step-3 (LMIN/LMAX range, fixed alpha/Fe = ALPHA_FIX)
+    # results used to select the survivor set. ALPHA is the Step-4
+    # (Mgb-focused, free alpha/Fe) result -- alpha is not constrained by
+    # Step 3, since alpha/Fe is fixed there. AGE_INITIAL/METAL_INITIAL are
+    # the same Step-3 values as AGE/METAL, kept as separate columns for
+    # backward compatibility with the other wrappers' FITS structure.
     columns = [
-        fits.Column(name="AGE", format="D", array=mean_result[:, 0]),
-        fits.Column(name="METAL", format="D", array=mean_result[:, 1]),
+        fits.Column(name="AGE", format="D", array=age_initial),
+        fits.Column(name="METAL", format="D", array=metal_initial),
         fits.Column(name="ALPHA", format="D", array=mean_result[:, 2]),
         fits.Column(name="AGE_INITIAL", format="D", array=age_initial),
         fits.Column(name="METAL_INITIAL", format="D", array=metal_initial),
@@ -702,7 +735,7 @@ def save_sfh(
     columns.append(fits.Column(name="EBV", format="D", array=EBV[:]))
 
     priHDU = fits.PrimaryHDU()
-    priHDU.header['HISTORY'] = SFH_METHOD_HISTORY
+    priHDU.header['HISTORY'] = f"SFH derived via alpha={ALPHA_FIX} and line-focused fitting"
     dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(columns), name="SFH")
 
     priHDU = _auxiliary.saveConfigToHeader(priHDU, config["SFH"])
@@ -716,11 +749,17 @@ def save_sfh(
 
     # ========================
     # SAVE WEIGHTS AND GRID
+    # WEIGHTS is the (age, met) marginal from Step 3 (longer LMIN/LMAX
+    # baseline) redistributed across alpha using Step 4's per-cell shape
+    # (shorter, alpha-sensitive SPEC_FSLF window) -- see run_ppxf's Step 5.
+    # Same (nAges, nMetal, nAlpha) flattened format, summing to 1, as
+    # ppxf_sfh_wrapper.py's WEIGHTS output, e.g. for
+    # geckos_plotting_utils.plot_rz_ssp_grid().
     outfits_sfh = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_sfh_weights.fits"
     printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh_weights.fits")
 
     priHDU = fits.PrimaryHDU()
-    priHDU.header['HISTORY'] = SFH_METHOD_HISTORY
+    priHDU.header['HISTORY'] = f"SFH derived via alpha={ALPHA_FIX} and line-focused fitting"
 
     cols_weights = [fits.Column(name="WEIGHTS", format=str(w_row.shape[1]) + "D", array=w_row)]
     dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols_weights), name="WEIGHTS")
@@ -749,7 +788,7 @@ def save_sfh(
     printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh_bestfit.fits")
 
     priHDU = fits.PrimaryHDU()
-    priHDU.header['HISTORY'] = SFH_METHOD_HISTORY
+    priHDU.header['HISTORY'] = f"SFH derived via alpha={ALPHA_FIX} and line-focused fitting"
 
     cols = []
     cols.append(fits.Column(name='BESTFIT', format=str(npix) + 'D', array=ppxf_bestfit))
@@ -814,9 +853,9 @@ def extractStarFormationHistories(config):
 
     Templates are prepared over the SFH.LMIN/SFH.LMAX fitting range. Steps
     0-3 run over that same range at fixed alpha/Fe (ALPHA_FIX = 0.20) to
-    obtain EBV and the surviving (age, met) grid points. Steps 4-6 rebuild a
+    obtain EBV and the surviving (age, met) grid points. Steps 4-5 rebuild a
     reduced multi-alpha template basis at those survivor points and re-fit
-    over the fixed Mgb window (5150-5200 Ang) with EBV fixed.
+    over the SFH.SPEC_FSLF window with EBV fixed.
 
     Args:
     - config: dictionary containing configuration parameters
@@ -862,12 +901,6 @@ def extractStarFormationHistories(config):
     lmin_eff = config["SFH"]["LMIN"]
     lmax_eff = config["SFH"]["LMAX"]
 
-    # The fixed SFH science window must also be covered by the fitting range.
-    if lmin_eff > SFH_LMIN or lmax_eff < SFH_LMAX:
-        logging.info("SFH.LMIN/SFH.LMAX does not cover the SFH science window, exiting")
-        printStatus.warning("SFH.LMIN/SFH.LMAX does not cover the SFH science window, exiting")
-        return
-
     # Limit to templates at the nearest grid value to ALPHA_FIX (always 0.20)
     alpha_values = alpha_grid[0, 0, :]
     alpha_idx = find_nearest_index(alpha_values, ALPHA_FIX)
@@ -908,17 +941,23 @@ def extractStarFormationHistories(config):
 
     logLam_full = logLam.copy()
 
-    # SFH window crop indices -- always 5100-5400 Ang (Mgb + Fe5270 + Fe5335),
-    # extended to include the nearest grid point at or below SFH_LMIN and at
-    # or above SFH_LMAX, so the window always fully brackets 5100-5400 Ang
-    # rather than falling just inside it.
-    wave_full = np.exp(logLam_full)
-    idx_left_candidates = np.where(wave_full <= SFH_LMIN)[0]
-    idx_right_candidates = np.where(wave_full >= SFH_LMAX)[0]
-    i_left = idx_left_candidates[-1] if len(idx_left_candidates) > 0 else 0
-    i_right = idx_right_candidates[0] if len(idx_right_candidates) > 0 else len(wave_full) - 1
+    # SFH window crop indices -- derived from SFH.SPEC_FSLF (a spectral mask
+    # spec in the same format as SFH.SPEC_MASK/SFH.SPEC_DUSTMASK) instead of
+    # a hardcoded wavelength range. The contiguous crop is bracketed to the
+    # bounding extent of the FSLF-good pixels, so it always fully contains
+    # the mask's good ranges rather than falling just inside them.
+    goodPixels_fslf_full = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_FSLF"], logLam_full)
+    i_left = int(np.min(goodPixels_fslf_full))
+    i_right = int(np.max(goodPixels_fslf_full))
     idx_lam_sfh = np.arange(i_left, i_right + 1)
     npix_sfh = len(idx_lam_sfh)
+
+    # The SFH.SPEC_FSLF window must also be covered by the fitting range.
+    wave_fslf = np.exp(logLam_full[idx_lam_sfh])
+    if lmin_eff > wave_fslf.min() or lmax_eff < wave_fslf.max():
+        logging.info("SFH.LMIN/SFH.LMAX does not cover the SFH.SPEC_FSLF window, exiting")
+        printStatus.warning("SFH.LMIN/SFH.LMAX does not cover the SFH.SPEC_FSLF window, exiting")
+        return
 
     nbins = bin_data.shape[1]
     npix = bin_data.shape[0]
@@ -967,6 +1006,11 @@ def extractStarFormationHistories(config):
         goodPixels_step0_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_PREMASK"], logLam)
     else:
         goodPixels_step0_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam)
+
+    if 'SPEC_DUSTMASK' in config["SFH"]:
+        goodPixels_dust_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_DUSTMASK"], logLam)
+    else:
+        goodPixels_dust_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam)
 
     goodPixels_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam)
 
@@ -1045,6 +1089,7 @@ def extractStarFormationHistories(config):
             velscale,
             start[ii, :],
             goodPixels_step0_sfh,
+            goodPixels_dust_sfh,
             goodPixels_sfh,
             config["SFH"]["MOM"],
             offset,
@@ -1114,6 +1159,7 @@ def extractStarFormationHistories(config):
                 velscale,
                 start[ii, :],
                 goodPixels_step0_sfh,
+                goodPixels_dust_sfh,
                 goodPixels_sfh,
                 config["SFH"]["MOM"],
                 offset,
