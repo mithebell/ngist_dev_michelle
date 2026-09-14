@@ -946,7 +946,11 @@ def extractStarFormationHistories(config):
     # a hardcoded wavelength range. The contiguous crop is bracketed to the
     # bounding extent of the FSLF-good pixels, so it always fully contains
     # the mask's good ranges rather than falling just inside them.
-    goodPixels_fslf_full = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_FSLF"], logLam_full)
+    if 'SPEC_FSLF' in config["SFH"]:
+        goodPixels_fslf_full = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_FSLF"], logLam_full)
+    else:
+        goodPixels_fslf_full = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam_full)
+        
     i_left = int(np.min(goodPixels_fslf_full))
     i_right = int(np.max(goodPixels_fslf_full))
     idx_lam_sfh = np.arange(i_left, i_right + 1)
