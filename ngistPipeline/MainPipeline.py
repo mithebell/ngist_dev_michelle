@@ -138,16 +138,16 @@ def runGIST(dirPath, galindex):
         skipGalaxy(config)
         return None
 
-    # - - - - - EMISSION LINES MODULE - - - - -
+    # - - - - - STAR FORMATION HISTORIES MODULE - - - - -
 
-    _ = _emissionLines.emissionLines_Module(config)
+    _ = _starFormationHistories.starFormationHistories_Module(config)
     if _ == "SKIP":
         skipGalaxy(config)
         return None
 
-    # - - - - - STAR FORMATION HISTORIES MODULE - - - - -
+    # - - - - - EMISSION LINES MODULE - - - - -
 
-    _ = _starFormationHistories.starFormationHistories_Module(config)
+    _ = _emissionLines.emissionLines_Module(config)
     if _ == "SKIP":
         skipGalaxy(config)
         return None
