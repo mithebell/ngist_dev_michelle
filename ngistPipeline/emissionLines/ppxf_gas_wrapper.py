@@ -253,6 +253,10 @@ def save_ppxf_emlines(
     npix,
     extra,
 ):
+
+    if 'DEBUG_BIN' in config["GAS"]:
+        config["GAS"]["DEBUG_BIN"] = str(config["GAS"]["DEBUG_BIN"])
+
     # ========================
     # SAVE RESULTS
     outfits_ppxf = rootname + "/" + outdir + "_gas_" + level.lower() + ".fits"
