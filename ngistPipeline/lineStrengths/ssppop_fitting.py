@@ -205,6 +205,51 @@ def lnprob(par, data, error, model_indices, params, tri):
         return -numpy.inf
     return lp + lnlike
 
+# ==============================================================================
+def mcmc_diagnostics(sampler, labels, burnin, data, error, model_indices, params, tri):
+    # Convergence diagnostics and best-fit residuals for one bin
+    chain = sampler.get_chain()
+    nsteps, nwalkers, ndim = chain.shape
+    lines = [f"steps={nsteps} walkers={nwalkers} burn-in={burnin}"]
+
+    acc = sampler.acceptance_fraction
+    lines.append(f"acceptance: mean={acc.mean():.2f} min={acc.min():.2f} max={acc.max():.2f}")
+
+    tau = sampler.get_autocorr_time(tol=0)
+    post = chain[burnin:]
+    half = post.shape[0] // 2
+    for i in range(ndim):
+        ratio = nsteps / tau[i]
+        flag = "" if ratio > 50 else "  <-- chain too short"
+        lines.append(f"{labels[i]:>6}: tau={tau[i]:.1f}  N/tau={ratio:.1f}{flag}")
+    for i in range(ndim):
+        qa = numpy.percentile(post[:half, :, i], [16, 50, 84])
+        qb = numpy.percentile(post[half:2 * half, :, i], [16, 50, 84])
+        shift = abs(qa[1] - qb[1]) / (0.5 * ((qa[2] - qa[0]) + (qb[2] - qb[0])))
+        lines.append(f"{labels[i]:>6}: median {qa[1]:.4f} vs {qb[1]:.4f} "
+                     f"(first vs second half, shift = {shift:.2f} widths)")
+
+    lp = sampler.get_log_prob(discard=burnin)
+    mean_lp = lp.mean(axis=0)
+    stuck = numpy.where(mean_lp < numpy.median(mean_lp) - 5)[0]
+    lines.append(f"walkers more than 5 lnP below the median walker: {stuck.tolist()}")
+
+    ibest = numpy.unravel_index(numpy.argmax(lp), lp.shape)
+    best = post[ibest]
+    model = compute_indices(best, data, model_indices, params, tri)
+    good = (error > 0) & numpy.isfinite(error) & numpy.isfinite(data)
+    resid = numpy.full(len(data), numpy.nan)
+    resid[good] = (data[good] - model[good]) / error[good]
+    chi2 = numpy.sum(resid[good] ** 2)
+    lines.append(f"best fit (max lnP={lp[ibest]:.2f}): "
+                 + ", ".join(f"{labels[i]}={best[i]:.4f}" for i in range(ndim)))
+    lines.append(f"chi2 = {chi2:.2f} for {good.sum()} indices, "
+                 f"{good.sum() - ndim} degrees of freedom")
+    for k in range(len(data)):
+        lines.append(f"  index {k}: data={data[k]:.3f} +/- {error[k]:.3f}  "
+                     f"model={model[k]:.3f}  resid={resid[k]:.2f} sigma")
+    return lines, best, model, resid, chi2
+
 
 # ==============================================================================
 def ssppop_fitting(
