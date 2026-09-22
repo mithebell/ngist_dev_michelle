@@ -221,6 +221,12 @@ def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0,
     bands[5, :] = tab["b6"]
     bands[6, :] = tab["b7"]
 
+    # Only plot indices flagged for SSP conversion (spp == 1)
+    if "spp" in tab.colnames:
+        plot_index = numpy.asarray(tab["spp"]) == 1
+    else:
+        plot_index = numpy.ones(len(names), dtype=bool)
+
     # Measure line indices
     num_ind = len(bands[0, :])
     index = numpy.zeros(num_ind)
@@ -228,7 +234,8 @@ def lsindex(ll, flux_in, noise, z, lickfile, plot=0, sims=0, z_err=0,
         # check whether the wavelength range is o.k.
         if (dll[0] <= bands[0, k]) and (dll[len(dll) - 1] >= bands[5, k]):
             # calculate index value
-            index[k] = calc_index_integral(bands[:, k], names[k], dll, flux, plot,
+            index[k] = calc_index_integral(bands[:, k], names[k], dll, flux,
+                                           plot if plot_index[k] else 0,
                                            plot_dir=plot_dir, bin_id=bin_id, run_id=run_id)
         else:
             # index outside wavelength range
