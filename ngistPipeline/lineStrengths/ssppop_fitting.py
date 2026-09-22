@@ -350,6 +350,34 @@ def ssppop_fitting(
         mcmc_dir = os.path.join(outdir, "Fig_LS", "MCMC")
         os.makedirs(mcmc_dir, exist_ok=True)
 
+        # Diagnostics and best fit
+        diag, best, model, resid, chi2 = mcmc_diagnostics(
+            sampler, labels, burnin, data, error, model_indices, params, tri
+        )
+        with open(os.path.join(mcmc_dir, f"Diagnostics_BINID{progress}.txt"), "w") as f:
+            f.write("\n".join(diag) + "\n")
+
+        fig_fit, (ax1, ax2) = plt.subplots(
+            2, 1, figsize=(6, 5), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
+        )
+        xi = numpy.arange(len(data))
+        ax1.errorbar(xi, data, yerr=error, fmt="ko", label="measured")
+        ax1.plot(xi, model, "r_", ms=18, mew=2, label="best-fit model")
+        ax1.set_ylabel("Index value")
+        ax1.legend(frameon=False, fontsize=9)
+        ax1.set_title(f"Best fit - Bin {progress}: chi2 = {chi2:.1f}", fontsize=11)
+        ax2.axhline(0, color="k", lw=0.8)
+        ax2.plot(xi, resid, "ko")
+        ax2.set_ylabel(r"(data - model) / $\sigma$")
+        ax2.set_xlabel("Index number")
+        ax2.set_xticks(xi)
+        fig_fit.tight_layout()
+        fig_fit.savefig(
+            os.path.join(mcmc_dir, f"BestFit_BINID{progress}.png"),
+            dpi=300, bbox_inches="tight"
+        )
+        plt.close(fig_fit)
+
         # ── Chain plot ────────────────────────────────────────────────────────
         fig_chain, axes = plt.subplots(ndim, 1, figsize=(10, 2.5 * ndim), sharex=True)
         if ndim == 1:
@@ -376,6 +404,8 @@ def ssppop_fitting(
         # ── Corner plot ───────────────────────────────────────────────────────
         corner_kwargs = dict(
             labels=labels,
+            truths=best,
+            truth_color="crimson",
             quantiles=[0.16, 0.5, 0.84],
             show_titles=True,
             title_fmt=".4f",
