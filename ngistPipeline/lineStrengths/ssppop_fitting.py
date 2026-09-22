@@ -250,7 +250,24 @@ def ssppop_fitting(
         moves=[(emcee.moves.DEMove(), 0.8), (emcee.moves.DESnookerMove(), 0.2)],
     )
 
-    # Running the Markov chain for NCHAIN iterations
+    # Restart walkers at the highest log likelihood sample after initial steps
+    n_initial = max(100, int(0.1 * nchain)) # 10% of the number of chains
+    sampler.run_mcmc(p0, n_initial, progress=False)
+    lp_initial = sampler.get_log_prob()
+    ibest = numpy.unravel_index(numpy.nanargmax(lp_initial), lp_initial.shape)
+    best_initial = sampler.get_chain()[ibest]
+    reinit_scale = 0.001 * param_range
+    p0 = []
+    for _ in range(nwalkers):
+        for _ in range(1000):
+            walker = best_initial + reinit_scale * numpy.random.randn(ndim)
+            if numpy.isfinite(lnprob(walker, data, error, model_indices, params, tri)):
+                break
+        else:
+            walker = best_initial.copy()
+        p0.append(walker)
+
+    # Running the Markov chain for NCHAIN iterations after the reinitialisation
     sampler.reset()
     for counter, result in enumerate(sampler.sample(p0, iterations=nchain)):
         if verbose == 1:
