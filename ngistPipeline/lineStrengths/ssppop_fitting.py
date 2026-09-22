@@ -244,9 +244,10 @@ def ssppop_fitting(
     else:
         p0 = [param_min + numpy.random.uniform(0, 1, ndim) * param_range for _ in range(nwalkers)]
 
-    # Setting up the sampler
+    # Setting up the sampler with differential-evolution moves
     sampler = emcee.EnsembleSampler(
-        nwalkers, ndim, lnprob, args=(data, error, model_indices, params, tri)
+        nwalkers, ndim, lnprob, args=(data, error, model_indices, params, tri),
+        moves=[(emcee.moves.DEMove(), 0.8), (emcee.moves.DESnookerMove(), 0.2)],
     )
 
     # Running the Markov chain for NCHAIN iterations
