@@ -72,9 +72,10 @@ PURPOSE:
     _sfh.fits          AGE, METAL (Step 4), ALPHA (Step 5), ALPHA_LONG (Step 4),
                        kinematics / SNR_POSTFIT / RED_CHI2 / EBV (Step 4),
                        RED_CHI2_SHORT (Step 5).
-    _sfh_weights.fits  WEIGHTS (Step-4 cube), GRID, WEIGHTS_SHORT (Step-5 cube,
-                       last extension; only the fitted (age, [M/H]) cell is
-                       populated and it sums to 1).
+    _sfh_weights.fits  WEIGHTS (Step-4 cube), GRID, WEIGHTS_SHORT (last
+                       extension): shape (nbins, nAlpha), the normalised
+                       Step-5 weight of each alpha template, in ascending
+                       alpha (= np.unique of the ALPHA column of GRID).
     _sfh_bestfit.fits  All base extensions (Step 4, full range) plus
                        BESTFIT_SHORT and LOGLAM_SHORT (Step 5, the SPEC_FSLF
                        window); header keys IPIXLO / IPIXHI on BESTFIT_SHORT
@@ -476,9 +477,6 @@ def run_ppxf(
     i_right,
     goodPixels_short,
     logLam_template,
-    nAges,
-    nMetal,
-    nAlpha,
 ):
 
     """
@@ -675,7 +673,14 @@ def run_ppxf(
         a_idx = int(np.argmin(np.abs(age_axis - mean_long[0])))
         m_idx = int(np.argmin(np.abs(metal_axis - mean_long[1])))
 
-        templates_short = np.ascontiguousarray(templates[:, a_idx, m_idx, :])  # (npix_temp, nAlpha)
+        # Alpha axis in ascending order; templates[:, :, :, k] belongs to alpha_grid[0, 0, k]
+        alpha_axis = alpha_grid[0, 0, :]
+        alpha_order = np.argsort(alpha_axis)
+        alpha_sorted = alpha_axis[alpha_order]
+        nAlpha = len(alpha_sorted)
+
+        # nAlpha templates at the snapped (age, [M/H]) cell, in ascending alpha
+        templates_short = np.ascontiguousarray(templates[:, a_idx, m_idx, alpha_order])  # (npix_temp, nAlpha)
 
         log_bin_data_short = log_bin_data[i_left:i_right + 1]
         noise_short = noise_new[i_left:i_right + 1]
@@ -720,16 +725,17 @@ def run_ppxf(
             dust=dust_step5,
         )
 
-        # Short-fit weights: only the fitted (age, [M/H]) cell is populated
+        # Short-fit weights: one normalised weight per alpha template, in ascending
+        # alpha. ALPHA is their weighted mean alpha.
         w_alpha = np.asarray(pp_step5.weights, dtype=float)
         w_alpha_sum = w_alpha.sum()
         if w_alpha_sum > 0:
-            weights_short = np.zeros((nAges, nMetal, nAlpha))
-            weights_short[a_idx, m_idx, :] = w_alpha / w_alpha_sum
-            w_row_short = np.array([np.reshape(weights_short, ncomb)])
+            w_row_short = np.array([w_alpha / w_alpha_sum])  # (1, nAlpha)
+            alpha_short = np.sum(w_row_short[0] * alpha_sorted)
         else:
             # No alpha weight at all: flag as NaN rather than inventing a shape
-            w_row_short = np.full((1, ncomb), np.nan)
+            w_row_short = np.full((1, nAlpha), np.nan)
+            alpha_short = np.nan
 
         #plotting output
         if doplot == True:
@@ -753,7 +759,8 @@ def run_ppxf(
 
             #calculate mean age, metallicity, and alpha for the long (step 4) and short (step 5) fits
             mean_results_step4 = mean_agemetalalpha(w_row, 10**logAge_grid, metal_grid, alpha_grid, 1)
-            mean_results_step5 = mean_agemetalalpha(w_row_short, 10**logAge_grid, metal_grid, alpha_grid, 1)
+            # Step 5 age and [M/H] are the snapped grid cell; alpha is from Step 5
+            mean_results_step5 = np.array([[age_axis[a_idx], metal_axis[m_idx], alpha_short]])
 
             # S/N of the residuals in the short window
             gp5 = pp_step5.goodpixels
@@ -839,7 +846,7 @@ def save_sfh(
     mpoly,
     apoly,
     mean_result_long,
-    mean_result_short,
+    alpha_short,
     w_row,
     w_row_short,
     logAge_grid,
@@ -871,7 +878,7 @@ def save_sfh(
     columns = [
         fits.Column(name="AGE", format="D", array=mean_result_long[:, 0]),
         fits.Column(name="METAL", format="D", array=mean_result_long[:, 1]),
-        fits.Column(name="ALPHA", format="D", array=mean_result_short[:, 2]),
+        fits.Column(name="ALPHA", format="D", array=alpha_short),
         fits.Column(name="ALPHA_LONG", format="D", array=mean_result_long[:, 2]),
     ]
 
@@ -932,9 +939,10 @@ def save_sfh(
     # ========================
     # SAVE WEIGHTS AND GRID
     # WEIGHTS: Step-4 (long, full-grid) cube. GRID: template grid.
-    # WEIGHTS_SHORT (last extension): Step-5 (short) cube, same flattened
-    # (nAges, nMetal, nAlpha) format, only the fitted (age, [M/H]) cell is
-    # populated. Its column is called WEIGHTS so the same reader code works.
+    # WEIGHTS_SHORT (last extension): Step-5 (short) weights, shape (nbins, nAlpha),
+    # one normalised weight per alpha template in ascending alpha order
+    # (alpha axis = np.unique of the ALPHA column of GRID). Its column is called
+    # WEIGHTS.
     # Define the output file
     outfits_sfh = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_sfh_weights.fits"
     printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh_weights.fits")
@@ -1316,7 +1324,7 @@ def extractStarFormationHistories(config):
     apoly = np.zeros((nbins, bin_data.shape[0]))
 
     # Define output arrays of the Step-5 (short) fit
-    w_row_short = np.zeros((nbins,ncomb))
+    w_row_short = np.zeros((nbins,nAlpha))
     ppxf_bestfit_short = np.zeros((nbins,npix_short))
     red_chi2_short = np.zeros(nbins)
 
@@ -1433,9 +1441,6 @@ def extractStarFormationHistories(config):
                     i_right,
                     goodPixels_sfh_short,
                     logLam_template,
-                    nAges,
-                    nMetal,
-                    nAlpha,
                 )
                 results.append(result)
             return results
@@ -1543,9 +1548,6 @@ def extractStarFormationHistories(config):
                 i_right,
                 goodPixels_sfh_short,
                 logLam_template,
-                nAges,
-                nMetal,
-                nAlpha,
             )
         printStatus.updateDone("Running PPXF in serial mode", progressbar=False)
 
@@ -1579,9 +1581,8 @@ def extractStarFormationHistories(config):
     mean_results_long = mean_agemetalalpha(
         w_row, 10**logAge_grid, metal_grid, alpha_grid, nbins
     )
-    mean_results_short = mean_agemetalalpha(
-        w_row_short, 10**logAge_grid, metal_grid, alpha_grid, nbins
-    )
+    alpha_sorted = np.sort(alpha_grid[0, 0, :])
+    alpha_short = np.sum(w_row_short * alpha_sorted[np.newaxis, :], axis=1)
 
     # Save to file
     if 'DEBUG_BIN' in config["SFH"]:
@@ -1608,7 +1609,7 @@ def extractStarFormationHistories(config):
         mpoly,
         apoly,
         mean_results_long,
-        mean_results_short,
+        alpha_short,
         w_row,
         w_row_short,
         logAge_grid,
