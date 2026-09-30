@@ -195,7 +195,7 @@ def run_ppxf_firsttime(
         plot=False,
         quiet=True,
         moments=nmoments,
-        degree=-1,
+        degree=degree,
         vsyst=offset,
         mdegree=mdeg,
         regul = regul,
@@ -347,7 +347,7 @@ def run_ppxf(
                 plot=False,
                 quiet=True,
                 moments=nmoments,
-                degree=-1,
+                degree=degree,
                 vsyst=offset,
                 mdegree=mdeg,
                 fixed=fixed,
@@ -399,7 +399,7 @@ def run_ppxf(
                 plot=False,
                 quiet=True,
                 moments=nmoments,
-                degree=-1,
+                degree=degree,
                 vsyst=offset,
                 mdegree=mdeg,
                 regul = regul,
@@ -475,7 +475,7 @@ def run_ppxf(
                     plot=False,
                     quiet=True,
                     moments=nmoments,
-                    degree=-1,
+                    degree=degree,
                     vsyst=offset,
                     mdegree=mdeg,
                     regul = 0,
@@ -525,6 +525,9 @@ def run_ppxf(
         # Save multiplicative Legendre polynomials (pp.mpoly is None if mdeg=-1)
         mpoly = pp.mpoly if pp.mpoly is not None else np.ones(len(log_bin_data))
 
+        # Save additive Legendre polynomials (pp.apoly is None if degree=-1)
+        apoly = pp.apoly if pp.apoly is not None else np.zeros(len(log_bin_data))
+
         return(
             pp.sol[:],
             w_row,
@@ -536,6 +539,7 @@ def run_ppxf(
             pp.chi2,
             EBV,
             mpoly,
+            apoly,
         )
 
     #except Exception as e:
@@ -550,8 +554,8 @@ def run_ppxf(
                 "mean_results_MC_mean":  np.nan,
                 "mean_results_MC_err":  np.nan
             }
-        return( np.nan, np.nan, np.nan, mc_results_nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
-
+        return( np.nan, np.nan, np.nan, mc_results_nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
+    
 def mean_agemetalalpha(w_row, ageGrid, metalGrid, alphaGrid, nbins):
     """
     Calculate the mean age, metallicity and alpha enhancement in each bin.
@@ -581,6 +585,7 @@ def save_sfh(
     red_chi2,
     EBV,
     mpoly,
+    apoly,
     mean_result,
     mean_result_MC_mean,
     mean_result_MC_err,
@@ -798,6 +803,12 @@ def save_sfh(
     mpolyHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
     mpolyHDU.name = "MPOLY"
 
+    # Table HDU with additive Legendre polynomials
+    cols = []
+    cols.append(fits.Column(name="APOLY", format=str(apoly.shape[1]) + "D", array=apoly))
+    apolyHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    apolyHDU.name = "APOLY"
+
     # Create HDU list and write to file
     priHDU = _auxiliary.saveConfigToHeader(priHDU, config["SFH"])
     dataHDU = _auxiliary.saveConfigToHeader(dataHDU, config["SFH"])
@@ -807,7 +818,8 @@ def save_sfh(
     goodpixHDU = _auxiliary.saveConfigToHeader(goodpixHDU, config["SFH"])
     goodpixClnHDU = _auxiliary.saveConfigToHeader(goodpixClnHDU, config["SFH"])
     mpolyHDU = _auxiliary.saveConfigToHeader(mpolyHDU, config["SFH"])
-    HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU, logLamTempHDU, specHDU, goodpixHDU, goodpixClnHDU, mpolyHDU])
+    apolyHDU = _auxiliary.saveConfigToHeader(apolyHDU, config["SFH"])
+    HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU, logLamTempHDU, specHDU, goodpixHDU, goodpixClnHDU, mpolyHDU, apolyHDU])
     HDUList.writeto(outfits_sfh, overwrite=True)
 
     fits.setval(outfits_sfh, "VELSCALE", value=velscale)
@@ -1006,6 +1018,7 @@ def extractStarFormationHistories(config):
     red_chi2 = np.zeros(nbins)
     EBV = np.zeros(nbins)
     mpoly = np.zeros((nbins, bin_data.shape[0]))
+    apoly = np.zeros((nbins, bin_data.shape[0]))
 
     # Define output arrays of MC realizations
     if nsims > 0:
@@ -1034,7 +1047,7 @@ def extractStarFormationHistories(config):
             goodPixels_step0_sfh,
             config["SFH"]["MOM"],
             offset,
-            -1,
+            config["SFH"].get("ADEG", -1),
             config["SFH"]["MDEG"],
             regul,
             velscale_ratio,
@@ -1090,7 +1103,7 @@ def extractStarFormationHistories(config):
                     goodPixels_sfh,
                     config["SFH"]["MOM"],
                     offset,
-                    -1,
+                    config["SFH"].get("ADEG", -1),
                     config["SFH"]["MDEG"],
                     regul,
                     config["SFH"]["DOCLEAN"],
@@ -1141,6 +1154,7 @@ def extractStarFormationHistories(config):
             red_chi2[i] = ppxf_tmp[i][7]
             EBV[i] = ppxf_tmp[i][8]
             mpoly[i,:] = ppxf_tmp[i][9]
+            apoly[i,:] = ppxf_tmp[i][10]
 
         # Remove the memory-mapped files
         os.remove(templates_filename_memmap)
@@ -1173,6 +1187,7 @@ def extractStarFormationHistories(config):
                 red_chi2[i],
                 EBV[i],
                 mpoly[i,:],
+                apoly[i,:],
             ) = run_ppxf(
                 templates,
                 bin_data[:,i],
@@ -1183,7 +1198,7 @@ def extractStarFormationHistories(config):
                 goodPixels_sfh,
                 config["SFH"]["MOM"],
                 offset,
-                -1,
+                config["SFH"].get("ADEG", -1),
                 config["SFH"]["MDEG"],
                 regul,
                 config["SFH"]["DOCLEAN"],
@@ -1262,6 +1277,7 @@ def extractStarFormationHistories(config):
         red_chi2,
         EBV,
         mpoly,
+        apoly,
         mean_results,
         mean_results_MC_mean,
         mean_results_MC_err,
