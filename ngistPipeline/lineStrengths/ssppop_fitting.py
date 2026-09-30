@@ -206,52 +206,6 @@ def lnprob(par, data, error, model_indices, params, tri):
     return lp + lnlike
 
 # ==============================================================================
-def mcmc_diagnostics(sampler, labels, burnin, data, error, model_indices, params, tri):
-    # Convergence diagnostics and best-fit residuals for one bin
-    chain = sampler.get_chain()
-    nsteps, nwalkers, ndim = chain.shape
-    lines = [f"steps={nsteps} walkers={nwalkers} burn-in={burnin}"]
-
-    acc = sampler.acceptance_fraction
-    lines.append(f"acceptance: mean={acc.mean():.2f} min={acc.min():.2f} max={acc.max():.2f}")
-
-    tau = sampler.get_autocorr_time(tol=0)
-    post = chain[burnin:]
-    half = post.shape[0] // 2
-    for i in range(ndim):
-        ratio = nsteps / tau[i]
-        flag = "" if ratio > 50 else "  <-- chain too short"
-        lines.append(f"{labels[i]:>6}: tau={tau[i]:.1f}  N/tau={ratio:.1f}{flag}")
-    for i in range(ndim):
-        qa = numpy.percentile(post[:half, :, i], [16, 50, 84])
-        qb = numpy.percentile(post[half:2 * half, :, i], [16, 50, 84])
-        shift = abs(qa[1] - qb[1]) / (0.5 * ((qa[2] - qa[0]) + (qb[2] - qb[0])))
-        lines.append(f"{labels[i]:>6}: median {qa[1]:.4f} vs {qb[1]:.4f} "
-                     f"(first vs second half, shift = {shift:.2f} widths)")
-
-    lp = sampler.get_log_prob(discard=burnin)
-    mean_lp = lp.mean(axis=0)
-    stuck = numpy.where(mean_lp < numpy.median(mean_lp) - 5)[0]
-    lines.append(f"walkers more than 5 lnP below the median walker: {stuck.tolist()}")
-
-    ibest = numpy.unravel_index(numpy.argmax(lp), lp.shape)
-    best = post[ibest]
-    model = compute_indices(best, data, model_indices, params, tri)
-    good = (error > 0) & numpy.isfinite(error) & numpy.isfinite(data)
-    resid = numpy.full(len(data), numpy.nan)
-    resid[good] = (data[good] - model[good]) / error[good]
-    chi2 = numpy.sum(resid[good] ** 2)
-    lines.append(f"best fit (max lnP={lp[ibest]:.2f}): "
-                 + ", ".join(f"{labels[i]}={best[i]:.4f}" for i in range(ndim)))
-    lines.append(f"chi2 = {chi2:.2f} for {good.sum()} indices, "
-                 f"{good.sum() - ndim} degrees of freedom")
-    for k in range(len(data)):
-        lines.append(f"  index {k}: data={data[k]:.3f} +/- {error[k]:.3f}  "
-                     f"model={model[k]:.3f}  resid={resid[k]:.2f} sigma")
-    return lines, best, model, resid, chi2
-
-
-# ==============================================================================
 def ssppop_fitting(
     data,
     error,
@@ -267,6 +221,7 @@ def ssppop_fitting(
     ncases,
     outdir,
     p0_centre=None,
+    index_names=None,
 ):
     ## Defining some parameters of the fitting
     ndim = len(params[0, :])
@@ -350,27 +305,36 @@ def ssppop_fitting(
         mcmc_dir = os.path.join(outdir, "Fig_LS", "MCMC")
         os.makedirs(mcmc_dir, exist_ok=True)
 
-        # Diagnostics and best fit
-        diag, best, model, resid, chi2 = mcmc_diagnostics(
-            sampler, labels, burnin, data, error, model_indices, params, tri
-        )
-        with open(os.path.join(mcmc_dir, f"Diagnostics_BINID{progress}.txt"), "w") as f:
-            f.write("\n".join(diag) + "\n")
+        # Highest-lnP sample and how well it fits the data
+        lp = sampler.get_log_prob(discard=burnin)
+        chain_post = sampler.get_chain(discard=burnin)
+        ibest = numpy.unravel_index(numpy.argmax(lp), lp.shape)
+        best = chain_post[ibest]
+        lnp_best = lp[ibest]
+        model = compute_indices(best, data, model_indices, params, tri)
+        good = (error > 0) & numpy.isfinite(error) & numpy.isfinite(data)
+        resid = numpy.full(len(data), numpy.nan)
+        resid[good] = (data[good] - model[good]) / error[good]
+        chi2 = numpy.sum(resid[good] ** 2)
 
+        if index_names is None:
+            index_names = [str(k) for k in range(len(data))]
+
+        # Best-fit plot
         fig_fit, (ax1, ax2) = plt.subplots(
             2, 1, figsize=(6, 5), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
         )
         xi = numpy.arange(len(data))
         ax1.errorbar(xi, data, yerr=error, fmt="ko", label="measured")
-        ax1.plot(xi, model, "r_", ms=18, mew=2, label="best-fit model")
+        ax1.plot(xi, model, "r_", ms=18, mew=2, label="highest-lnP model")
         ax1.set_ylabel("Index value")
         ax1.legend(frameon=False, fontsize=9)
         ax1.set_title(f"Best fit - Bin {progress}: chi2 = {chi2:.1f}", fontsize=11)
         ax2.axhline(0, color="k", lw=0.8)
         ax2.plot(xi, resid, "ko")
         ax2.set_ylabel(r"(data - model) / $\sigma$")
-        ax2.set_xlabel("Index number")
         ax2.set_xticks(xi)
+        ax2.set_xticklabels(index_names, rotation=45, ha="right")
         fig_fit.tight_layout()
         fig_fit.savefig(
             os.path.join(mcmc_dir, f"BestFit_BINID{progress}.png"),
@@ -378,7 +342,7 @@ def ssppop_fitting(
         )
         plt.close(fig_fit)
 
-        # ── Chain plot ────────────────────────────────────────────────────────
+        # Chain plot
         fig_chain, axes = plt.subplots(ndim, 1, figsize=(10, 2.5 * ndim), sharex=True)
         if ndim == 1:
             axes = [axes]
@@ -401,7 +365,7 @@ def ssppop_fitting(
         )
         plt.close(fig_chain)
 
-        # ── Corner plot ───────────────────────────────────────────────────────
+        # Corner plot
         corner_kwargs = dict(
             labels=labels,
             truths=best,
@@ -423,6 +387,8 @@ def ssppop_fitting(
             verbose=False,
         )
         fig_corner = corner.corner(good_samples, **corner_kwargs)
+        best_line = plt.Line2D([0], [0], color="crimson", lw=2, label=f"Highest lnP sample ($\\ln$P = {lnp_best:.1f})")
+        fig_corner.legend(handles=[best_line], loc="upper right", bbox_to_anchor=(0.95, 0.75), frameon=False, fontsize=11)
         plt.suptitle(f"Posterior — Bin {progress}", fontsize=12, y=1.01)
         fig_corner.savefig(
             os.path.join(mcmc_dir, f"Corner_BINID{progress}.png"),

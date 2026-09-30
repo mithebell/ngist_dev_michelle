@@ -210,6 +210,7 @@ def run_ls(
                 nbins,
                 corner_dir,
                 p0_centre=p0_centre,
+                index_names=index_names,
             )
 
             percentiles = np.percentile(chains, np.arange(101), axis=0)
