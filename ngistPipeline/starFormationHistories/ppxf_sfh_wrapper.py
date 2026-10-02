@@ -333,6 +333,14 @@ def run_ppxf(
                 dust_step12 = None
                 dust_step3 = None
 
+            # If the kinematics are fixed, the dust is fixed and there is no multiplicative
+            # polynomial (mdeg <= 0), pPXF has no free non-linear parameters left and crashes
+            # inside capfit. In that case tell pPXF to only do the linear (weights + apoly) fit.
+            if fixed is not None and all(fixed) and mdeg <= 0:
+                linear_only = True
+            else:
+                linear_only = False
+
             # First Call PPXF - do fit and estimate noise
             # use fake noise for first iteration
             fake_noise=np.full_like(log_bin_data, 1.0)
@@ -354,7 +362,8 @@ def run_ppxf(
                 lam=np.exp(logLam),
                 velscale_ratio=velscale_ratio,
                 component=component_step12,
-                dust=dust_step12,                
+                dust=dust_step12,
+                linear=linear_only,
             )
             
             goodPixels_preclip = goodPixels
@@ -407,7 +416,8 @@ def run_ppxf(
                 lam=np.exp(logLam),
                 velscale_ratio=velscale_ratio,
                 component=component_step3,
-                dust=dust_step3,                
+                dust=dust_step3,
+                linear=linear_only,
             )
 
         #update goodpixels again
@@ -484,6 +494,7 @@ def run_ppxf(
                     velscale_ratio=velscale_ratio,
                     component=component_step3,
                     dust=dust_step3,
+                    linear=linear_only,
                 )
                 weights_mc_iter   = mc_iter.weights.reshape(templates.shape[1:])/mc_iter.weights.sum()
                 w_row_MC[o, :]    = np.reshape(weights_mc_iter, ncomb)
@@ -522,11 +533,9 @@ def run_ppxf(
         # add normalisation factor back in main results
         pp.bestfit = pp.bestfit * median_log_bin_data
 
-        # Save multiplicative Legendre polynomials (pp.mpoly is None if mdeg=-1)
+        # Save additive & multiplicative Legendre polynomials (pp.a/mpoly is None if a/mdeg=-1)
+        apoly = pp.apoly if pp.apoly is not None else np.ones(len(log_bin_data))
         mpoly = pp.mpoly if pp.mpoly is not None else np.ones(len(log_bin_data))
-
-        # Save additive Legendre polynomials (pp.apoly is None if degree=-1)
-        apoly = pp.apoly if pp.apoly is not None else np.zeros(len(log_bin_data))
 
         return(
             pp.sol[:],
