@@ -244,7 +244,7 @@ def prepareSpectralTemplateLibrary(config, lmin, lmax, velscale, LSF_Data, LSF_T
             idx_k = np.where(metal == orig_metal_grid[j])[0][0]
             idx_i = np.where(alpha == orig_alpha_grid[j])[0][0]
             ssp = orig_templates[j, :][idx_lam]
-            ssp_data = varsmooth(new_wave, ssp_data, sigma)
+            ssp = varsmooth(new_wave, ssp, sigma)
             sspNew, logLam2, _ = log_rebin(
                 new_wave, ssp, velscale=velscale
             )
