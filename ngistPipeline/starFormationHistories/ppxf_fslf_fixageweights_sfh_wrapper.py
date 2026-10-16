@@ -38,49 +38,68 @@ PURPOSE:
   ui.adsabs.harvard.edu/?#abs/2017MNRAS.466..798C).
 
   On top of the full-grid fit of ppxf_sfh_wrapper.py it adds a feature-focused
-  ("short") fit that constrains [alpha/Fe] from the SFH.SPEC_FSLF window, with
-  the mean age and mean metallicity of the full-range ("long") fit held fixed.
+  ("short") fit over the SFH.SPEC_FSLF window, built from the weights of the
+  full-range ("long") fit.
 
-  METHOD: fix <Age> and <[M/H]>   (ppxf_fslf_fixmeanagemet_sfh_wrapper.py)
+  METHOD: fix the age weights, fit [M/H] and alpha
+          (ppxf_fslf_fixageweights_sfh_wrapper.py)
 
   Steps 1-4 are identical to ppxf_sfh_wrapper.py (no Monte Carlo):
     Step 1: fake-noise fit to rescale the noise vector.
     Step 2: 3-sigma clipping of outliers (SFH.DOCLEAN).
-    Step 3: dust-only (E(B-V)) fit, no polynomials.
+    Step 3: dust-only (E(B-V)) fit, no polynomials (SFH.SPEC_DUSTMASK if set,
+            otherwise SFH.SPEC_MASK). Only run when SFH.DUST_CORR is set;
+            otherwise EBV is NaN and no dust is used in Steps 4 and 5.
     Step 4: regularised fit of the FULL (nAges x nMetal x nAlpha) template grid
             over the SFH.LMIN/SFH.LMAX range, EBV fixed from Step 3 when
-            SFH.DUST_CORR is set.  This is the "long" fit: it provides the
+            SFH.DUST_CORR is set, multiplicative polynomial SFH.MDEG, no
+            additive polynomial.  This is the "long" fit: it provides the
             kinematics, RED_CHI2, SNR_POSTFIT, the WEIGHTS cube, and the mean
-            age / [M/H] / [alpha/Fe] (AGE, METAL, ALPHA_LONG).
+            age / [M/H] / [alpha/Fe] (AGE, METAL, ALPHA).
 
   Step 5 (feature fit, the "short" fit):
-    - <Age> and <[M/H]> are the weighted means of the Step-4 weights (same
-      definition as the saved AGE / METAL: linear age in Gyr, arithmetic
-      [M/H]), each snapped to the nearest grid value.
-    - Only the nAlpha templates at that single (age, [M/H]) grid cell are fit,
-      to the galaxy cropped to the SFH.SPEC_FSLF window (bounding extent of its
-      good pixels; SFH.SPEC_MASK if SPEC_FSLF is not set).
+    - The Step-4 weights are summed over [M/H] and alpha, giving one weight
+      per age (they sum to 1; ages with zero weight drop out).
+    - One composite template is built for every ([M/H], alpha) cell:
+        composite([M/H]_j, alpha_k) = sum over ages of  weight(age) *
+                                      template(age, [M/H]_j, alpha_k)
+      so nMetal x nAlpha composite templates are fit.
+    - AGE_SHORT is the fixed Step-4 mean age; METAL_SHORT and ALPHA_SHORT are
+      the weighted means of the composites.
+    - Fit to the galaxy cropped to the SFH.SPEC_FSLF window (bounding extent
+      of its good pixels; SFH.SPEC_MASK if SPEC_FSLF is not set). The spectrum
+      and noise are only cropped, never changed.
     - Pixel mask: the SFH.SPEC_MASK good pixels cropped to that window (not the
       Step 2 clip mask).
-    - EBV is fixed to the Step-3 value and the kinematics are fixed to the
-      Step-4 solution (so linear=True is safe), mdegree=-1, no additive
+    - EBV is fixed to the Step-3 value (when SFH.DUST_CORR is set, as in Step 4)
+      and the kinematics are fixed to the Step-4 solution. No additive
       polynomial, regul=0.
-    - ALPHA is the weighted mean alpha of the fitted alpha weights (NaN if they
-      are all zero).
+    - Multiplicative polynomial, set by SFH.MDEG_FSLF (default 'extended'):
+        'extended' : the Step-4 mpoly is multiplied into the templates
+                     (mdegree=-1). Needs SFH.MDEG > 0.
+        N >= 1     : Step 5 fits its own degree-N mpoly; the Step-4 mpoly is
+                     not used.
+        -1         : no polynomial.
+    - The fitted weights are normalised to sum to 1 (NaN if they are all zero).
 
   Outputs:
-    _sfh.fits          AGE, METAL (Step 4), ALPHA (Step 5), ALPHA_LONG (Step 4),
-                       kinematics / SNR_POSTFIT / RED_CHI2 / EBV (Step 4),
-                       RED_CHI2_SHORT (Step 5).
-    _sfh_weights.fits  WEIGHTS (Step-4 cube), GRID, WEIGHTS_SHORT (last
-                       extension): shape (nbins, nAlpha), the normalised
-                       Step-5 weight of each alpha template, in ascending
-                       alpha (= np.unique of the ALPHA column of GRID).
+    _sfh.fits          AGE, METAL, ALPHA (Step 4); AGE_SHORT, METAL_SHORT,
+                       ALPHA_SHORT (Step 5); kinematics / SNR_POSTFIT /
+                       RED_CHI2 / EBV (Step 4); RED_CHI2_SHORT (Step 5).
+    _sfh_weights.fits  WEIGHTS (Step-4 cube), GRID, GRID_SHORT (age / [M/H] /
+                       alpha of every Step-5 template; NaN = fixed to the
+                       Step-4 mix), WEIGHTS_SHORT (last extension): shape (nbins, nMetal*nAlpha): one weight per
+                       ([M/H], alpha) composite, in the order of GRID_SHORT
+                       (reshape to (nMetal, nAlpha)).
     _sfh_bestfit.fits  All base extensions (Step 4, full range) plus
-                       BESTFIT_SHORT and LOGLAM_SHORT (Step 5, the SPEC_FSLF
-                       window); header keys IPIXLO / IPIXHI on BESTFIT_SHORT
-                       give the first / last pixel (0-based, inclusive) of that
-                       window in LOGLAM (LOGLAM_SHORT == LOGLAM[IPIXLO:IPIXHI+1]).
+                       BESTFIT_SHORT and MPOLY_SHORT (Step 5, the SPEC_FSLF
+                       window; MPOLY_SHORT is the polynomial used in Step 5,
+                       ones if none). Header keys IPIXLO / IPIXHI on
+                       BESTFIT_SHORT give the first / last pixel (0-based,
+                       inclusive) of that window in LOGLAM, so the window's
+                       wavelengths are LOGLAM[IPIXLO:IPIXHI+1], its spectrum
+                       SPEC[:, IPIXLO:IPIXHI+1], and its good pixels the GOODPIX
+                       values between IPIXLO and IPIXHI (minus IPIXLO).
 """
 
 
@@ -243,15 +262,15 @@ def plot_ppxf_sfh(pp, x, i, outfig_ppxf, snrCubevar=-99, snrResid=-99,
     if polynomial is None or np.size(polynomial) == 0:
         polynomial = np.full(len(x), reference_value, dtype=float)
 
-    if EBV == None:
-        poly_min = np.nanmin(polynomial)
-        poly_max = np.nanmax(polynomial)
-        padding = 0.25 * max(poly_max - poly_min, 1.0)
-        poly_min -= padding
-        poly_max += padding
-        EBVstring = 0.0
-    else:
-        EBVstring = 0.0
+    #if EBV == None:
+    #    poly_min = np.nanmin(polynomial)
+    #    poly_max = np.nanmax(polynomial)
+    #    padding = 0.25 * max(poly_max - poly_min, 1.0)
+    #    poly_min -= padding
+    #    poly_max += padding
+    #    EBVstring = 0.0
+    #else:
+    #    EBVstring = 0.0
 
     axpoly.plot(x, polynomial, color='orchid', linewidth=0.8,
                 antialiased=False)
@@ -261,7 +280,6 @@ def plot_ppxf_sfh(pp, x, i, outfig_ppxf, snrCubevar=-99, snrResid=-99,
 
     axpoly.set_ylabel(poly_label)
     axpoly.set_ylim(poly_min, poly_max)
-    axpoly.set_xlabel('wavelength [Ang]')
     axpoly.tick_params(direction='in', which='both')
     axpoly.minorticks_on()
     axpoly.xaxis.set_minor_locator(ticker.AutoMinorLocator(10))
@@ -295,10 +313,11 @@ def plot_ppxf_sfh(pp, x, i, outfig_ppxf, snrCubevar=-99, snrResid=-99,
         axdust.set_ylim(0., 1.15)
     else:
         axdust.set_ylim(0.95, 1.05)
+        axdust.set_yticks([1.0])  # one tick, so it does not overlap the m-poly panel's labels
 
     
     axdust.set_ylabel('dust factor')
-    axdust.set_xlabel('wavelength [Ang]')
+    axdust.set_xlabel('rest-frame wavelength [Ang]')
     axdust.tick_params(direction='in', which='both')
     axdust.minorticks_on()
     axdust.xaxis.set_minor_locator(ticker.AutoMinorLocator(10))
@@ -477,6 +496,7 @@ def run_ppxf(
     i_right,
     goodPixels_short,
     logLam_template,
+    mdeg_fslf,
 ):
 
     """
@@ -485,10 +505,12 @@ def run_ppxf(
     ui.adsabs.harvard.edu/?#abs/2017MNRAS.466..798C).
 
     Steps 1-4 are identical to ppxf_sfh_wrapper.py (long fit, full template
-    grid, LMIN/LMAX range).  Step 5 fixes <Age> and <[M/H]> from Step 4
-    (snapped to the nearest grid cell) and fits only the nAlpha templates at
-    that cell to the SPEC_FSLF window (short fit), with EBV and the kinematics
-    fixed to the Step 3 / Step 4 values.
+    grid, LMIN/LMAX range).
+    Step 5 sums the Step 4 weights over [M/H] and alpha to get one weight per
+    age, builds one composite template per ([M/H], alpha) cell from those
+    weights, and fits the composites to the SPEC_FSLF window (short fit).
+    EBV and the kinematics are fixed to the Step 3 / Step 4 values, and the
+    polynomial is set by SFH.MDEG_FSLF (see the module docstring).
     """
     # printStatus.progressBar(i, nbins, barLength=50)
 
@@ -554,45 +576,53 @@ def run_ppxf(
                 # Add clipped pixels to the original masked emission lines regions and repeat the fit
                 mask &= mask0
 
+            
+            
             ################ 3 ##################
             # Third step - Only fit dust, no polynomials allowed
             #create a mask for dust specifically
-            mask_dust = np.zeros_like(mask, dtype=bool)
-            mask_dust[goodPixels_dust] = True
-            mask_dust &= mask # Keep only pixels good in both masks
+            EBV = np.nan
 
-            # create the dust model
-            Rv = 4.05
-            Av_init = 4.05 * EBV_init            
-            component_step3 = [0] *  np.prod(optimal_template_in.shape[1:])
-            component_true_step3 = np.array(component_step3) == 0
-            dust = [{"start": [Av_init], "bounds": [[0, 8]], "component": component_true_step3}]
+            if config["SFH"]["DUST_CORR"]:
+                
+                mask_dust = np.zeros_like(mask, dtype=bool)
+                mask_dust[goodPixels_dust] = True
+                mask_dust &= mask # Keep only pixels good in both masks
 
-            # fit only for dust
-            pp_step3 = ppxf(
-                optimal_template_in, 
-                log_bin_data, 
-                noise_new, 
-                velscale, 
-                lam=np.exp(logLam), 
-                mask=mask_dust,
-                degree=-1, 
-                mdegree=-1,
-                regul=0,
-                fixed=fixed,
-                vsyst=offset, 
-                velscale_ratio=velscale_ratio,
-                moments=nmoments, 
-                start=start, 
-                plot=False, 
-                dust = dust, 
-                component = component_step3, 
-                quiet=True,
-            )
+                # create the dust model
+                Rv = 4.05
+                Av_init = 4.05 * EBV_init            
+                component_step3 = [0] *  np.prod(optimal_template_in.shape[1:])
+                component_true_step3 = np.array(component_step3) == 0
+                dust = [{"start": [Av_init], "bounds": [[0, 8]], "component": component_true_step3}]
 
-            # Save dust values
-            Av = pp_step3.dust[0]["sol"][0]
-            EBV = Av/Rv
+                # fit only for dust
+                pp_step3 = ppxf(
+                    optimal_template_in, 
+                    log_bin_data, 
+                    noise_new, 
+                    velscale, 
+                    lam=np.exp(logLam), 
+                    mask=mask_dust,
+                    degree=-1, 
+                    mdegree=-1,
+                    regul=0,
+                    fixed=fixed,
+                    vsyst=offset, 
+                    velscale_ratio=velscale_ratio,
+                    moments=nmoments, 
+                    start=start, 
+                    plot=False, 
+                    dust = dust, 
+                    component = component_step3, 
+                    quiet=True,
+                )
+
+                # Save dust values
+                Av = pp_step3.dust[0]["sol"][0]
+                EBV = Av/Rv
+
+            # prepare for step 4
             component_step4 = [0]*ncomb
             component_true_step4 = np.array(component_step4) == 0
 
@@ -617,7 +647,7 @@ def run_ppxf(
                 quiet=True,
                 moments=nmoments,
                 vsyst=offset,
-                degree=degree,
+                degree=-1,
                 mdegree=mdeg,
                 regul = regul,
                 fixed=fixed,
@@ -657,40 +687,54 @@ def run_ppxf(
         w_row   = np.array([np.reshape(weights, ncomb)])
 
         ################ 5 ##################
-        # Fifth step: feature ("short") fit with <Age> and <[M/H]> fixed.
-        # <Age> and <[M/H]> are the Step-4 weighted means (same definition as
-        # the saved AGE/METAL), each snapped to the nearest grid value. Only the
-        # nAlpha templates at that (age, [M/H]) cell are fit, to the galaxy
-        # cropped to the SPEC_FSLF window, with the SPEC_MASK good pixels
-        # cropped to the same window (not the Step-2 clip mask). EBV is fixed to
-        # the Step-3 value and the kinematics to the Step-4 solution, so a
-        # purely linear fit (linear=True) is safe. mdegree=-1, no additive
-        # polynomial, never regularised.
+        # Fifth step: feature ("short") fit over the SPEC_FSLF window.
+        # The galaxy spectrum and noise are only cropped to the window, never changed.
+        # EBV is fixed to the Step-3 value (as in Step 4) and the kinematics to the
+        # Step-4 solution. Never regularised. The polynomial is set by SFH.MDEG_FSLF.
         mean_long = mean_agemetalalpha(w_row, 10**logAge_grid, metal_grid, alpha_grid, 1)[0]
 
-        age_axis = 10**logAge_grid[:, 0, 0]
-        metal_axis = metal_grid[0, :, 0]
-        a_idx = int(np.argmin(np.abs(age_axis - mean_long[0])))
-        m_idx = int(np.argmin(np.abs(metal_axis - mean_long[1])))
+        # One weight per age: Step-4 weights summed over [M/H] and alpha
+        weights_age = weights.sum(axis=(1, 2))  # (nAges,)
 
-        # Alpha axis in ascending order; templates[:, :, :, k] belongs to alpha_grid[0, 0, k]
-        alpha_axis = alpha_grid[0, 0, :]
-        alpha_order = np.argsort(alpha_axis)
-        alpha_sorted = alpha_axis[alpha_order]
-        nAlpha = len(alpha_sorted)
+        # One composite template per ([M/H], alpha) cell: sum over ages of weight * template
+        nMetal_short = templates.shape[2]
+        nAlpha_short = templates.shape[3]
+        templates_cells = np.zeros((templates.shape[0], nMetal_short, nAlpha_short))
+        for a in range(templates.shape[1]):
+            if weights_age[a] > 0:
+                templates_cells = templates_cells + templates[:, a, :, :] * weights_age[a]
+        templates_short = templates_cells.reshape(templates.shape[0], nMetal_short * nAlpha_short)
 
-        # nAlpha templates at the snapped (age, [M/H]) cell, in ascending alpha
-        templates_short = np.ascontiguousarray(templates[:, a_idx, m_idx, alpha_order])  # (npix_temp, nAlpha)
+        # [M/H] and alpha of each composite (same order as templates_short)
+        metal_cells = metal_grid[0, :, :].ravel()
+        alpha_cells = alpha_grid[0, :, :].ravel()
 
         log_bin_data_short = log_bin_data[i_left:i_right + 1]
         noise_short = noise_new[i_left:i_right + 1]
         logLam_short = logLam[i_left:i_right + 1]
 
+        # Multiplicative polynomial of the short fit (SFH.MDEG_FSLF)
+        if mdeg_fslf == "extended":
+            # Step-4 mpoly multiplied into the templates. A template pixel at log(lam_t)
+            # lands on the galaxy pixel log(lam_t) + V/c, so evaluate the polynomial there.
+            mpoly_temp = np.interp(logLam_template + pp.sol[0] / C, logLam, pp.mpoly)
+            templates_short = templates_short * mpoly_temp[:, np.newaxis]
+            mpoly_short = pp.mpoly[i_left:i_right + 1]
+            mdeg_short = -1
+        elif mdeg_fslf == -1:
+            # No polynomial
+            mpoly_short = np.ones(len(logLam_short))
+            mdeg_short = -1
+        else:
+            # Step 5 fits its own degree-N polynomial (the Step-4 one is not used)
+            mpoly_short = None
+            mdeg_short = mdeg_fslf
+
         # Kinematics fixed to the Step-4 solution
         start_short = np.array(pp.sol[:nmoments], dtype=float)
         fixed_short = [True] * nmoments
 
-        component_step5 = [0] * nAlpha
+        component_step5 = [0] * templates_short.shape[1]
         component_true_step5 = np.array(component_step5) == 0
         if config["SFH"]["DUST_CORR"] == True:
             dust_step5 = [{"start": [Av], "bounds": [[0, 8]], "component": component_true_step5,
@@ -703,6 +747,7 @@ def run_ppxf(
 
         # Note: lam and lam_temp are both given, so vsyst must NOT be passed
         # (pPXF computes it, and asserts vsyst == 0 in that case).
+        # linear=True is only allowed without a fitted polynomial.
         pp_step5 = ppxf(
             templates_short,
             log_bin_data_short,
@@ -714,10 +759,10 @@ def run_ppxf(
             quiet=True,
             moments=nmoments,
             degree=-1,
-            mdegree=-1,
+            mdegree=mdeg_short,
             regul=0,
             fixed=fixed_short,
-            linear=True,
+            linear=(mdeg_short <= 0),
             lam=np.exp(logLam_short),
             lam_temp=np.exp(logLam_template),
             velscale_ratio=velscale_ratio,
@@ -725,17 +770,22 @@ def run_ppxf(
             dust=dust_step5,
         )
 
-        # Short-fit weights: one normalised weight per alpha template, in ascending
-        # alpha. ALPHA is their weighted mean alpha.
-        w_alpha = np.asarray(pp_step5.weights, dtype=float)
-        w_alpha_sum = w_alpha.sum()
-        if w_alpha_sum > 0:
-            w_row_short = np.array([w_alpha / w_alpha_sum])  # (1, nAlpha)
-            alpha_short = np.sum(w_row_short[0] * alpha_sorted)
+        # Polynomial used in the window (saved as MPOLY_SHORT, and shown in the Step-5 plot)
+        if mpoly_short is None:
+            mpoly_short = pp_step5.mpoly
         else:
-            # No alpha weight at all: flag as NaN rather than inventing a shape
-            w_row_short = np.full((1, nAlpha), np.nan)
-            alpha_short = np.nan
+            pp_step5.mpoly = mpoly_short
+
+        # Short-fit weights, normalised to sum to 1 (NaN if they are all zero)
+        w_short = np.asarray(pp_step5.weights, dtype=float)
+        if w_short.sum() > 0:
+            w_short = w_short / w_short.sum()
+        else:
+            w_short = np.full(len(w_short), np.nan)
+
+        # One weight per ([M/H], alpha) composite. Age is the fixed Step-4 mean.
+        w_row_short = np.array([w_short])  # (1, nMetal*nAlpha)
+        mean_short = np.array([mean_long[0], np.sum(w_short * metal_cells), np.sum(w_short * alpha_cells)])
 
         #plotting output
         if doplot == True:
@@ -759,8 +809,8 @@ def run_ppxf(
 
             #calculate mean age, metallicity, and alpha for the long (step 4) and short (step 5) fits
             mean_results_step4 = mean_agemetalalpha(w_row, 10**logAge_grid, metal_grid, alpha_grid, 1)
-            # Step 5 age and [M/H] are the snapped grid cell; alpha is from Step 5
-            mean_results_step5 = np.array([[age_axis[a_idx], metal_axis[m_idx], alpha_short]])
+            # Step 5 means (see the module docstring for what is fixed)
+            mean_results_step5 = np.array([mean_short])
 
             # S/N of the residuals in the short window
             gp5 = pp_step5.goodpixels
@@ -770,12 +820,18 @@ def run_ppxf(
             #produce plots
             tmp_plot1 = plot_ppxf_sfh(pp_step1,np.exp(logLam),i,outfigFile_step1,snrCubevar=snr_prefit,
                                       snrResid=snr_Resid1,poly_type='mpoly')
-            tmp_plot3 = plot_ppxf_sfh(pp_step3,np.exp(logLam),i,outfigFile_step3,snrCubevar=snr_prefit,
+            
+            if config["SFH"]["DUST_CORR"]:
+                tmp_plot3 = plot_ppxf_sfh(pp_step3,np.exp(logLam),i,outfigFile_step3,snrCubevar=snr_prefit,
                                       snrResid=snr_Resid1,EBV=EBV,poly_type='mpoly')
-            tmp_plot4 = plot_ppxf_sfh(pp,np.exp(logLam),i,outfigFile_step4,snrCubevar=snr_prefit,snrResid=snr_postfit,\
-                             goodpixelsPre=goodPixels_preclip,mean_results=mean_results_step4,EBV=EBV,poly_type='mpoly')
+
+            EBV_plot = None
+            if config["SFH"]["DUST_CORR"]:
+                EBV_plot = EBV
+            tmp_plot4 = plot_ppxf_sfh(pp,np.exp(logLam),i,outfigFile_step4,snrCubevar=snr_prefit,snrResid=snr_postfit,
+                             goodpixelsPre=goodPixels_preclip,mean_results=mean_results_step4,EBV=EBV_plot,poly_type='mpoly')
             tmp_plot5 = plot_ppxf_sfh(pp_step5,np.exp(logLam_short),i,outfigFile_step5,snrCubevar=snr_prefit,
-                                      snrResid=snr_postfit_short,mean_results=mean_results_step5,EBV=EBV,
+                                      snrResid=snr_postfit_short,mean_results=mean_results_step5,EBV=EBV_plot,
                                       poly_type='mpoly',figsize=(8, 4.8))
 
         # add normalisation factor back in main results
@@ -801,6 +857,8 @@ def run_ppxf(
             w_row_short,
             bestfit_short,
             pp_step5.chi2,
+            mpoly_short,
+            mean_short,
         )
 
     except Exception as e:
@@ -809,7 +867,7 @@ def run_ppxf(
         tb = traceback.format_exc()
         logging.warning(f"run_ppxf failed for bin {i}: {e}\n{tb}")
         printStatus.warning(f"An error occurred in bin {i}: {e}")
-        return( np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
+        return( np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
 
 
 def mean_agemetalalpha(w_row, ageGrid, metalGrid, alphaGrid, nbins):
@@ -846,9 +904,11 @@ def save_sfh(
     mpoly,
     apoly,
     mean_result_long,
-    alpha_short,
+    mean_result_short,
     w_row,
     w_row_short,
+    mpoly_short,
+    grid_short,
     logAge_grid,
     metal_grid,
     alpha_grid,
@@ -863,23 +923,23 @@ def save_sfh(
 ):
     """ Save all results to disk. """
 
-    history = ("SFH: Steps 1-4 full-grid long fit (AGE, METAL, ALPHA_LONG); "
-               "Step 5 feature fit with fixed mean age and [M/H] (ALPHA)")
+    history = ("SFH: Steps 1-4 full-grid long fit (AGE, METAL, ALPHA); "
+               "Step 5 fits [M/H] and alpha, with the Step-4 age weights fixed (AGE_SHORT, METAL_SHORT, ALPHA_SHORT)")
 
     # Define the output file
     outfits_sfh = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_sfh.fits"
     printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh.fits")
 
     # Table HDU with stellar kinematics
-    # AGE/METAL: mean age and [M/H] of the Step-4 (long, full-grid) fit, which
-    # are held fixed in the Step-5 feature fit. ALPHA: mean [alpha/Fe] of the
-    # Step-5 (short, SPEC_FSLF window) fit. ALPHA_LONG: mean [alpha/Fe] of the
-    # Step-4 fit, kept for comparing full-spectrum and feature fitting.
+    # AGE/METAL/ALPHA: mean age, [M/H] and [alpha/Fe] of the Step-4 (long, full-grid) fit.
+    # AGE_SHORT/METAL_SHORT/ALPHA_SHORT: the same for the Step-5 (short, SPEC_FSLF window) fit.
     columns = [
         fits.Column(name="AGE", format="D", array=mean_result_long[:, 0]),
         fits.Column(name="METAL", format="D", array=mean_result_long[:, 1]),
-        fits.Column(name="ALPHA", format="D", array=alpha_short),
-        fits.Column(name="ALPHA_LONG", format="D", array=mean_result_long[:, 2]),
+        fits.Column(name="ALPHA", format="D", array=mean_result_long[:, 2]),
+        fits.Column(name="AGE_SHORT", format="D", array=mean_result_short[:, 0]),
+        fits.Column(name="METAL_SHORT", format="D", array=mean_result_short[:, 1]),
+        fits.Column(name="ALPHA_SHORT", format="D", array=mean_result_short[:, 2]),
     ]
 
     # If FIXED is False, add kinematic columns (from the Step-4 long fit)
@@ -939,10 +999,9 @@ def save_sfh(
     # ========================
     # SAVE WEIGHTS AND GRID
     # WEIGHTS: Step-4 (long, full-grid) cube. GRID: template grid.
-    # WEIGHTS_SHORT (last extension): Step-5 (short) weights, shape (nbins, nAlpha),
-    # one normalised weight per alpha template in ascending alpha order
-    # (alpha axis = np.unique of the ALPHA column of GRID). Its column is called
-    # WEIGHTS.
+    # GRID_SHORT: age / [M/H] / alpha of every Step-5 template (NaN = fixed to the Step-4 mix).
+    # WEIGHTS_SHORT (last extension): Step-5 (short) weights, one normalised weight
+    # per Step-5 template, in the order of GRID_SHORT. Its column is called WEIGHTS.
     # Define the output file
     outfits_sfh = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_sfh_weights.fits"
     printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh_weights.fits")
@@ -963,12 +1022,17 @@ def save_sfh(
                  for name, array in zip(["LOGAGE", "METAL", "ALPHA"], [logAge_row, metal_row, alpha_row])]
     gridHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols_grid), name="GRID")
 
+    # Table HDU with the grid of the Step-5 templates
+    cols_grid_short = [fits.Column(name=name, format="D", array=array)
+                       for name, array in zip(["LOGAGE", "METAL", "ALPHA"], grid_short)]
+    gridShortHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols_grid_short), name="GRID_SHORT")
+
     # Table HDU with the short-fit weights (last extension)
     cols_weights_short = [fits.Column(name="WEIGHTS", format=str(w_row_short.shape[1]) + "D", array=w_row_short)]
     shortHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols_weights_short), name="WEIGHTS_SHORT")
 
     # Create HDU list and write to file
-    HDUList = fits.HDUList([_auxiliary.saveConfigToHeader(hdu, config["SFH"]) for hdu in [priHDU, dataHDU, gridHDU, shortHDU]])
+    HDUList = fits.HDUList([_auxiliary.saveConfigToHeader(hdu, config["SFH"]) for hdu in [priHDU, dataHDU, gridHDU, gridShortHDU, shortHDU]])
     HDUList.writeto(outfits_sfh, overwrite=True)
 
     # Set additional header values
@@ -1055,13 +1119,12 @@ def save_sfh(
     bestfitShortHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
     bestfitShortHDU.name = "BESTFIT_SHORT"
 
-    # Table HDU with the Step-5 (short window) logLam: logLam[i_left:i_right+1],
-    # i.e. the same crop as BESTFIT_SHORT / IPIXLO / IPIXHI, saved directly for
-    # convenience.
+    # Table HDU with the multiplicative polynomial used in Step 5, over the same window
+    # ('extended': the Step-4 mpoly; N: Step 5's own fit; -1: ones)
     cols = []
-    cols.append(fits.Column(name="LOGLAM_SHORT", format="D", array=logLam[i_left:i_right + 1]))
-    logLamShortHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
-    logLamShortHDU.name = "LOGLAM_SHORT"
+    cols.append(fits.Column(name="MPOLY_SHORT", format=str(mpoly_short.shape[1]) + "D", array=mpoly_short))
+    mpolyShortHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
+    mpolyShortHDU.name = "MPOLY_SHORT"
 
     # Create HDU list and write to file
     priHDU = _auxiliary.saveConfigToHeader(priHDU, config["SFH"])
@@ -1076,8 +1139,8 @@ def save_sfh(
     bestfitShortHDU = _auxiliary.saveConfigToHeader(bestfitShortHDU, config["SFH"])
     bestfitShortHDU.header["IPIXLO"] = (int(i_left), "first pixel of window in LOGLAM (0-based)")
     bestfitShortHDU.header["IPIXHI"] = (int(i_right), "last pixel of window in LOGLAM (0-based, inclusive)")
-    logLamShortHDU = _auxiliary.saveConfigToHeader(logLamShortHDU, config["SFH"])
-    HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU, logLamTempHDU, specHDU, goodpixHDU, goodpixClnHDU, mpolyHDU, optHDU, bestfitShortHDU, logLamShortHDU])
+    mpolyShortHDU = _auxiliary.saveConfigToHeader(mpolyShortHDU, config["SFH"])
+    HDUList = fits.HDUList([priHDU, dataHDU, logLamHDU, logLamTempHDU, specHDU, goodpixHDU, goodpixClnHDU, mpolyHDU, optHDU, bestfitShortHDU, mpolyShortHDU])
     HDUList.writeto(outfits_sfh, overwrite=True)
 
     fits.setval(outfits_sfh, "VELSCALE", value=velscale)
@@ -1102,9 +1165,8 @@ def extractStarFormationHistories(config):
     with a run of unregularized pPXF and the analysis started.  Results are
     saved to disk and the plotting routines called.
 
-    This wrapper (fix <Age> and <[M/H]>) additionally runs a feature-focused
-    fit of the nAlpha templates at the cell nearest the Step-4 mean age and
-    [M/H] over the SFH.SPEC_FSLF window. See the module docstring.
+    This wrapper (fix the age weights, fit [M/H] and alpha) adds a Step-5 fit
+    over the SFH.SPEC_FSLF window. See the module docstring.
     Args:
     - config: dictionary containing configuration parameters
     """
@@ -1291,6 +1353,20 @@ def extractStarFormationHistories(config):
     if len(goodPixels_sfh_short) == 0:
         raise ValueError("No SFH.SPEC_MASK good pixels fall inside the SFH.SPEC_FSLF window")
 
+    # Multiplicative polynomial of the Step-5 (short) fit, SFH.MDEG_FSLF:
+    #   'extended' = multiply the Step-4 mpoly into the templates, N >= 1 = fit a degree-N mpoly, -1 = none
+    mdeg_fslf = config["SFH"].get("MDEG_FSLF", "extended")
+    if str(mdeg_fslf).strip().lower() == "extended":
+        mdeg_fslf = "extended"
+        if config["SFH"]["MDEG"] <= 0:
+            raise ValueError("SFH.MDEG_FSLF = 'extended' needs SFH.MDEG > 0 (there is no Step-4 mpoly to use)")
+    else:
+        mdeg_fslf = int(mdeg_fslf)
+        if mdeg_fslf == 0 or mdeg_fslf < -1:
+            raise ValueError("SFH.MDEG_FSLF must be 'extended', -1, or a degree >= 1 (got %s)" % mdeg_fslf)
+    printStatus.done("Step-5 polynomial (SFH.MDEG_FSLF): " + str(mdeg_fslf))
+    logging.info("Step-5 polynomial (SFH.MDEG_FSLF): " + str(mdeg_fslf))
+
     # Check if plot keyword is set:
     doplot = config["SFH"].get("PLOT", False)
 
@@ -1324,9 +1400,15 @@ def extractStarFormationHistories(config):
     apoly = np.zeros((nbins, bin_data.shape[0]))
 
     # Define output arrays of the Step-5 (short) fit
-    w_row_short = np.zeros((nbins,nAlpha))
+    # Step-5 weights: one per ([M/H], alpha) composite.
+    # GRID_SHORT gives the age / [M/H] / alpha of each Step-5 template (NaN = fixed to the Step-4 mix)
+    nshort = nMetal * nAlpha
+    grid_short = [np.full(nshort, np.nan), metal_grid[0, :, :].ravel(), alpha_grid[0, :, :].ravel()]
+    w_row_short = np.zeros((nbins, nshort))
     ppxf_bestfit_short = np.zeros((nbins,npix_short))
     red_chi2_short = np.zeros(nbins)
+    mpoly_short = np.zeros((nbins, npix_short))
+    mean_results_short = np.zeros((nbins, 3))
 
     # ====================
     # If OPT_TEMP keyword set to 'galaxy_single' or 'galaxy_set' then
@@ -1441,6 +1523,7 @@ def extractStarFormationHistories(config):
                     i_right,
                     goodPixels_sfh_short,
                     logLam_template,
+                    mdeg_fslf,
                 )
                 results.append(result)
             return results
@@ -1484,6 +1567,8 @@ def extractStarFormationHistories(config):
             w_row_short[i,:] = ppxf_tmp[i][11]
             ppxf_bestfit_short[i,:] = ppxf_tmp[i][12]
             red_chi2_short[i] = ppxf_tmp[i][13]
+            mpoly_short[i,:] = ppxf_tmp[i][14]
+            mean_results_short[i,:] = ppxf_tmp[i][15]
 
         printStatus.updateDone("Running PPXF in parallel mode", progressbar=False)
         
@@ -1515,6 +1600,8 @@ def extractStarFormationHistories(config):
                 w_row_short[i,:],
                 ppxf_bestfit_short[i,:],
                 red_chi2_short[i],
+                mpoly_short[i,:],
+                mean_results_short[i,:],
             ) = run_ppxf(
                 templates,
                 bin_data[:,i],
@@ -1548,6 +1635,7 @@ def extractStarFormationHistories(config):
                 i_right,
                 goodPixels_sfh_short,
                 logLam_template,
+                mdeg_fslf,
             )
         printStatus.updateDone("Running PPXF in serial mode", progressbar=False)
 
@@ -1577,12 +1665,11 @@ def extractStarFormationHistories(config):
         logging.info("There were no problems in the analysis.")
     print("")
 
-    # Calculate mean age, metallicity and alpha of the long (Step 4) and short (Step 5) fits
+    # Mean age, metallicity and alpha of the long (Step 4) fit.
+    # Those of the short (Step 5) fit come back from run_ppxf (mean_results_short).
     mean_results_long = mean_agemetalalpha(
         w_row, 10**logAge_grid, metal_grid, alpha_grid, nbins
     )
-    alpha_sorted = np.sort(alpha_grid[0, 0, :])
-    alpha_short = np.sum(w_row_short * alpha_sorted[np.newaxis, :], axis=1)
 
     # Save to file
     if 'DEBUG_BIN' in config["SFH"]:
@@ -1609,9 +1696,11 @@ def extractStarFormationHistories(config):
         mpoly,
         apoly,
         mean_results_long,
-        alpha_short,
+        mean_results_short,
         w_row,
         w_row_short,
+        mpoly_short,
+        grid_short,
         logAge_grid,
         metal_grid,
         alpha_grid,
