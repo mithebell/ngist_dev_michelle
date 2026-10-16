@@ -214,7 +214,6 @@ def plot_ppxf_sfh(pp, x, i, outfig_ppxf, snrCubevar=-99, snrResid=-99,
 
     axpoly.set_ylabel(poly_label)
     axpoly.set_ylim(poly_min, poly_max)
-    axpoly.set_xlabel('wavelength [Ang]')
     axpoly.tick_params(direction='in', which='both')
     axpoly.minorticks_on()
     axpoly.xaxis.set_minor_locator(ticker.AutoMinorLocator(10))
@@ -248,10 +247,11 @@ def plot_ppxf_sfh(pp, x, i, outfig_ppxf, snrCubevar=-99, snrResid=-99,
         axdust.set_ylim(0., 1.15)
     else:
         axdust.set_ylim(0.95, 1.05)
+        axdust.set_yticks([1.0])  # one tick, so it does not overlap the m-poly panel's labels
 
     
     axdust.set_ylabel('dust factor')
-    axpoly.set_xlabel('rest-frame wavelength [Ang]')
+    axdust.set_xlabel('rest-frame wavelength [Ang]')
     axdust.tick_params(direction='in', which='both')
     axdust.minorticks_on()
     axdust.xaxis.set_minor_locator(ticker.AutoMinorLocator(10))
