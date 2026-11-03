@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import tempfile
+import gc
 import time
 import traceback
 
@@ -35,16 +36,16 @@ PURPOSE:
   by full-spectral fitting. It follows the step structure of ppxf_sfh_wrapper
   (Step 1 noise estimate, Step 2 clipping, Step 3 dust-only fit, Step 4 full
   fit). Templates are prepared, and Steps 1-4 are run, over the wavelength
-  range LMIN_DUSTMPOLY/LMAX_DUSTMPOLY (falling back to LMIN/LMAX if not
-  given) to obtain EBV and MPOLY. A final Step 5 then re-fits the weights over
-  the science range (LMIN/LMAX) with EBV and MPOLY fixed from that fit.
+  range LMIN/LMAX to obtain EBV and MPOLY. A final Step 5 then re-fits the
+  weights over LMIN_STEP5/LMAX_STEP5 (falling back to LMIN/LMAX if not given)
+  with EBV and MPOLY fixed from that fit.
 
   Steps:
-    1: fake-noise fit (optimal template, MPOLY, no dust)  [DUSTMPOLY range]
-    2: 3-sigma outlier clipping                            [DUSTMPOLY range]
-    3: dust-only fit (no polynomials) -> EBV               [DUSTMPOLY range, only if DUST_CORR]
-    4: full-template fit, EBV fixed, MPOLY free -> MPOLY   [DUSTMPOLY range]
-    5: templates multiplied by the fixed MPOLY, EBV fixed  [LMIN/LMAX]
+    1: fake-noise fit (optimal template, MPOLY, no dust)  [LMIN/LMAX range]
+    2: 3-sigma outlier clipping                            [LMIN/LMAX range]
+    3: dust-only fit (no polynomials) -> EBV               [LMIN/LMAX range, only if DUST_CORR]
+    4: full-template fit, EBV fixed, MPOLY free -> MPOLY   [LMIN/LMAX range]
+    5: templates multiplied by the fixed MPOLY, EBV fixed  [LMIN_STEP5/LMAX_STEP5]
 
   All fits pass lam and lam_temp with vsyst=0, so pPXF works out the
   template/data offset itself for each wavelength range.
@@ -354,7 +355,7 @@ def run_ppxf_firsttime(
 ):
     """
     Call PPXF for first time to get optimal template.
-    Runs over the LMIN_DUSTMPOLY/LMAX_DUSTMPOLY range on the combined spectrum.
+    Runs over the LMIN/LMAX range on the combined spectrum.
     """
 
     printStatus.running("Running pPXF for the first time")
@@ -437,8 +438,8 @@ def run_ppxf(
     non-parametric star-formation histories.
 
     log_bin_data, log_bin_error, logLam and all goodPixels arrays cover the
-    LMIN_DUSTMPOLY/LMAX_DUSTMPOLY range. Steps 1-4 use these arrays directly.
-    Step 5 crops them to the science range (idx_lam_sfh, LMIN/LMAX) and
+    LMIN/LMAX range. Steps 1-4 use these arrays directly.
+    Step 5 crops them to the Step 5 range (idx_lam_sfh, LMIN_STEP5/LMAX_STEP5) and
     re-fits the weights with EBV and MPOLY fixed from Steps 3 and 4.
 
     No additive polynomials are used anywhere (degree=-1).
@@ -463,6 +464,12 @@ def run_ppxf(
                 linear_only = True
             else:
                 linear_only = False
+
+            # Figure folder (each step is plotted straight after its fit, so
+            # that its pPXF result can be freed before the next step)
+            if doplot == True:
+                outfigDir = os.path.join(config["GENERAL"]["OUTPUT"],"FigFit_SFH")
+                os.makedirs(outfigDir, exist_ok=True)
 
             ################ 1 ##################
             # First step: fit with fake noise to estimate the noise
@@ -516,6 +523,18 @@ def run_ppxf(
                 # Add clipped pixels to the original masked emission lines regions
                 mask &= mask0
 
+            # Plot Step 1 now and then free it. Every pPXF result keeps its own
+            # copies of the templates (and their FFT), so keeping the Step 1, 3
+            # and 4 results alive until Step 5 multiplies the memory used by
+            # each parallel worker.
+            if doplot == True:
+                outfigFile_step1 = (
+                    os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
+                                    + "_sfh_bin_"+str(i)+"_step1.pdf"))
+                tmp_plot1 = plot_ppxf_sfh(pp_step1, np.exp(logLam), i, outfigFile_step1,
+                                          snrCubevar=snr_prefit, snrResid=snr_Resid1, poly_type='mpoly')
+            del pp_step1
+
             ################ 3 ##################
             # Third step: only fit dust, no polynomials
             EBV = np.nan
@@ -561,6 +580,20 @@ def run_ppxf(
                 Av = pp_step3.dust[0]["sol"][0]
                 EBV = Av/Rv
 
+                # Plot Step 3 now and then free it
+                if doplot == True:
+                    outfigFile_step3 = (
+                        os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
+                                        + "_sfh_bin_"+str(i)+"_step3.pdf"))
+                    tmp_plot3 = plot_ppxf_sfh(pp_step3, np.exp(logLam), i, outfigFile_step3,
+                                              snrCubevar=snr_prefit, snrResid=snr_Resid1,
+                                              EBV=EBV, poly_type='mpoly')
+                del pp_step3
+
+            EBV_plot = None
+            if config["SFH"]["DUST_CORR"]:
+                EBV_plot = EBV
+
             # Components and fixed dust for Steps 4 and 5 (all templates)
             component_step4 = [0]*ncomb
             component_true_step4 = np.array(component_step4) == 0
@@ -596,8 +629,23 @@ def run_ppxf(
                 dust=dust_step4,
             )
 
+            # Keep only the MPOLY coefficients from Step 4
+            mpolyweights_step4 = pp_step4.mpolyweights
+
+            # Plot Step 4 now and then free it before Step 5
+            if doplot == True:
+                outfigFile_step4 = (
+                    os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
+                                    + "_sfh_bin_"+str(i)+"_step4.pdf"))
+                tmp_plot4 = plot_ppxf_sfh(pp_step4, np.exp(logLam), i, outfigFile_step4,
+                                          snrCubevar=snr_prefit, snrResid=snr_Resid1,
+                                          goodpixelsPre=goodPixels_preclip, EBV=EBV_plot,
+                                          poly_type='mpoly')
+            del pp_step4
+            gc.collect()
+
             ################ 5 ##################
-            # Fifth step: crop to the science range (LMIN/LMAX)
+            # Fifth step: crop to the Step 5 range (LMIN_STEP5/LMAX_STEP5)
             log_bin_data_sfh = log_bin_data[idx_lam_sfh]
             noise_new_sfh    = noise_new[idx_lam_sfh]
             logLam_sfh       = logLam[idx_lam_sfh]
@@ -608,9 +656,9 @@ def run_ppxf(
             # MPOLY = 1 + sum(c_k * L_k(x)) for k=1..mdeg
             coeffs = np.zeros(mdeg + 1)
             coeffs[0] = 1.0
-            coeffs[1:] = pp_step4.mpolyweights
+            coeffs[1:] = mpolyweights_step4
 
-            # Map wavelengths to [-1, 1] over the DUSTMPOLY range — the same
+            # Map wavelengths to [-1, 1] over the LMIN/LMAX range — the same
             # normalisation pPXF used internally in Step 4
             lam_first = logLam[0]
             lam_last = logLam[-1]
@@ -622,7 +670,7 @@ def run_ppxf(
             x_temp = np.clip(x_temp, -1, 1)
             mpoly_on_temp_grid = legendre.legval(x_temp, coeffs)
 
-            # MPOLY at the science-range data wavelengths (saved for output)
+            # MPOLY at the Step 5 range data wavelengths (saved for output)
             x_sfh = 2*(logLam_sfh - lam_first)/(lam_last - lam_first) - 1
             mpoly_sfh = legendre.legval(x_sfh, coeffs)
 
@@ -638,7 +686,7 @@ def run_ppxf(
             # With fixed kinematics, fixed dust and no polynomials, pPXF has
             # no free non-linear parameters left and only the linear fit for
             # the weights can be done. When the kinematics are free, they are
-            # fitted again over the science range.
+            # fitted again over the Step 5 range.
             if fixed is not None:
                 linear_step5 = True
             else:
@@ -670,7 +718,7 @@ def run_ppxf(
         # Update goodpixels from Step 5
         goodPixels_final = pp.goodpixels
 
-        # Make spectral mask (science range)
+        # Make spectral mask (Step 5 range)
         spectral_mask = np.full_like(log_bin_data_sfh, 0.0)
         spectral_mask[goodPixels_final] = 1.0
 
@@ -699,18 +747,6 @@ def run_ppxf(
         # Plotting output
         if doplot == True:
 
-            outfigDir = os.path.join(config["GENERAL"]["OUTPUT"],"FigFit_SFH")
-            os.makedirs(outfigDir, exist_ok=True)
-
-            outfigFile_step1 = (
-                os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
-                                + "_sfh_bin_"+str(i)+"_step1.pdf"))
-            outfigFile_step3 = (
-                os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
-                                + "_sfh_bin_"+str(i)+"_step3.pdf"))
-            outfigFile_step4 = (
-                os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
-                                + "_sfh_bin_"+str(i)+"_step4.pdf"))
             outfigFile_step5 = (
                 os.path.join(outfigDir, config["GENERAL"]["RUN_ID"]
                                 + "_sfh_bin_"+str(i)+"_step5.pdf"))
@@ -718,26 +754,9 @@ def run_ppxf(
             # Calculate mean age, metallicity, and alpha of the final fit
             mean_results_step5 = mean_agemetalalpha(w_row, 10**logAge_grid, metal_grid, alpha_grid, 1)
 
-            EBV_plot = None
-            if config["SFH"]["DUST_CORR"]:
-                EBV_plot = EBV
 
-            # Steps 1, 3 and 4 are plotted over the DUSTMPOLY range
-            tmp_plot1 = plot_ppxf_sfh(pp_step1, np.exp(logLam), i, outfigFile_step1,
-                                      snrCubevar=snr_prefit, snrResid=snr_Resid1, poly_type='mpoly')
-
-            if config["SFH"]["DUST_CORR"]:
-                tmp_plot3 = plot_ppxf_sfh(pp_step3, np.exp(logLam), i, outfigFile_step3,
-                                          snrCubevar=snr_prefit, snrResid=snr_Resid1,
-                                          EBV=EBV, poly_type='mpoly')
-
-            tmp_plot4 = plot_ppxf_sfh(pp_step4, np.exp(logLam), i, outfigFile_step4,
-                                      snrCubevar=snr_prefit, snrResid=snr_Resid1,
-                                      goodpixelsPre=goodPixels_preclip, EBV=EBV_plot,
-                                      poly_type='mpoly')
-
-            # Step 5 is plotted over the science range. Pre-clip goodpixels
-            # re-indexed to the science-range array (idx_lam_sfh is
+            # Step 5 is plotted over the Step 5 range. Pre-clip goodpixels
+            # re-indexed to the Step 5 range array (idx_lam_sfh is
             # contiguous, so subtracting its first index works).
             goodPixels_preclip_sfh = np.intersect1d(goodPixels_preclip, idx_lam_sfh) - idx_lam_sfh[0]
 
@@ -810,7 +829,7 @@ def run_ppxf(
         # Restore the median normalisation
         pp.bestfit = pp.bestfit * median_log_bin_data
 
-        # MPOLY saved is the Step 4 Legendre poly at the science-range wavelengths
+        # MPOLY saved is the Step 4 Legendre poly at the Step 5 range wavelengths
         mpoly = mpoly_sfh
 
         return(
@@ -1083,10 +1102,10 @@ def extractStarFormationHistories(config):
     """
     Starts the computation of non-parametric star-formation histories with pPXF.
 
-    Templates and data are prepared/loaded over LMIN_DUSTMPOLY/LMAX_DUSTMPOLY
-    (config["SFH"], defaulting to LMIN/LMAX). Steps 1-4 run over that range to
-    obtain EBV and MPOLY. Step 5 then crops to the science range (LMIN/LMAX)
-    and re-fits the weights with EBV and MPOLY fixed.
+    Templates and data are prepared/loaded over LMIN/LMAX. Steps 1-4 run over
+    that range to obtain EBV and MPOLY. Step 5 then crops to
+    LMIN_STEP5/LMAX_STEP5 (config["SFH"], defaulting to LMIN/LMAX) and re-fits
+    the weights with EBV and MPOLY fixed.
 
     Args:
     - config: dictionary containing configuration parameters
@@ -1114,19 +1133,21 @@ def extractStarFormationHistories(config):
         printStatus.warning("SFH.ADEG is ignored by this wrapper: no additive polynomials are used (degree=-1)")
         logging.warning("SFH.ADEG is ignored by this wrapper: no additive polynomials are used (degree=-1)")
 
-    # Wavelength range for the templates and Steps 1-4. Falls back to LMIN/LMAX
-    # when LMIN_DUSTMPOLY/LMAX_DUSTMPOLY are not given.
-    lmin_dustmpoly = config["SFH"].get("LMIN_DUSTMPOLY", config["SFH"]["LMIN"])
-    lmax_dustmpoly = config["SFH"].get("LMAX_DUSTMPOLY", config["SFH"]["LMAX"])
+    # Wavelength ranges: the templates and Steps 1-4 use LMIN/LMAX; Step 5
+    # uses LMIN_STEP5/LMAX_STEP5 (falling back to LMIN/LMAX if not given)
+    lmin_fit = config["SFH"]["LMIN"]
+    lmax_fit = config["SFH"]["LMAX"]
+    lmin_step5 = config["SFH"].get("LMIN_STEP5", config["SFH"]["LMIN"])
+    lmax_step5 = config["SFH"].get("LMAX_STEP5", config["SFH"]["LMAX"])
 
-    # The DUSTMPOLY range must cover the science range, since Step 5 crops
-    # the data, mask and MPOLY from it down to LMIN/LMAX
-    if lmin_dustmpoly > config["SFH"]["LMIN"] or lmax_dustmpoly < config["SFH"]["LMAX"]:
-        logging.info("LMIN_DUSTMPOLY/LMAX_DUSTMPOLY does not cover science range LMIN/LMAX, exiting")
-        printStatus.warning("LMIN_DUSTMPOLY/LMAX_DUSTMPOLY does not cover science range LMIN/LMAX, exiting")
+    # LMIN/LMAX must cover the Step 5 range, since Step 5 crops the data and
+    # mask from it down to LMIN_STEP5/LMAX_STEP5
+    if lmin_step5 < lmin_fit or lmax_step5 > lmax_fit:
+        logging.info("LMIN/LMAX does not cover the Step 5 range LMIN_STEP5/LMAX_STEP5, exiting")
+        printStatus.warning("LMIN/LMAX does not cover the Step 5 range LMIN_STEP5/LMAX_STEP5, exiting")
         return
 
-    # Prepare templates over the DUSTMPOLY range
+    # Prepare templates over the LMIN/LMAX range
     (
         templates,
         lamRange_temp,
@@ -1141,8 +1162,8 @@ def extractStarFormationHistories(config):
         nAlpha,
     ) = _prepareTemplates.prepareTemplates_Module(
         config,
-        lmin_dustmpoly,
-        lmax_dustmpoly,
+        lmin_fit,
+        lmax_fit,
         velscale/velscale_ratio,
         LSF_Data,
         LSF_Templates,
@@ -1160,37 +1181,37 @@ def extractStarFormationHistories(config):
     if ncomb != np.prod(templates.shape[1:]):
         raise ValueError("ncomb does not match the template-grid dimensions")
 
-    # Effective DUSTMPOLY range — whichever is most restrictive: the requested
-    # LMIN_DUSTMPOLY/LMAX_DUSTMPOLY, the template coverage, or the data
+    # Effective LMIN/LMAX range — whichever is most restrictive: the requested
+    # LMIN/LMAX, the template coverage, or the data
     # coverage (LMIN_TOT/LMAX_TOT)
-    lmin_eff = max(lmin_dustmpoly, lamRange_temp[0], config["READ_DATA"]["LMIN_TOT"])
-    lmax_eff = min(lmax_dustmpoly, lamRange_temp[1], config["READ_DATA"]["LMAX_TOT"])
+    lmin_eff = max(lmin_fit, lamRange_temp[0], config["READ_DATA"]["LMIN_TOT"])
+    lmax_eff = min(lmax_fit, lamRange_temp[1], config["READ_DATA"]["LMAX_TOT"])
 
     if lmin_eff >= lmax_eff:
         logging.info("Template wavelength range does not overlap with data range, exiting")
         printStatus.warning("Template wavelength range does not overlap with data range, exiting")
         return
 
-    if lmin_eff > lmin_dustmpoly or lmax_eff < lmax_dustmpoly:
+    if lmin_eff > lmin_fit or lmax_eff < lmax_fit:
         printStatus.warning(
-            f"Templates or data do not cover the full LMIN_DUSTMPOLY/LMAX_DUSTMPOLY range. "
+            f"Templates or data do not cover the full LMIN/LMAX range. "
             f"Using effective range {lmin_eff:.1f}-{lmax_eff:.1f} A for Steps 1-4."
         )
         logging.warning(
-            f"Effective DUSTMPOLY range cropped to template/data coverage: {lmin_eff:.1f}-{lmax_eff:.1f} A"
+            f"Effective LMIN/LMAX range cropped to template/data coverage: {lmin_eff:.1f}-{lmax_eff:.1f} A"
         )
 
-    # Check science range is still covered
-    if lmin_eff > config["SFH"]["LMIN"] or lmax_eff < config["SFH"]["LMAX"]:
-        logging.info("Template/data wavelength range does not cover science range LMIN/LMAX, exiting")
-        printStatus.warning("Template/data wavelength range does not cover science range LMIN/LMAX, exiting")
+    # Check Step 5 range is still covered
+    if lmin_eff > lmin_step5 or lmax_eff < lmax_step5:
+        logging.info("Template/data wavelength range does not cover the Step 5 range LMIN_STEP5/LMAX_STEP5, exiting")
+        printStatus.warning("Template/data wavelength range does not cover the Step 5 range LMIN_STEP5/LMAX_STEP5, exiting")
         return
 
     # Define file paths
     gas_cleaned_file = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + '_gas_cleaned_'+config["GAS"]["LEVEL"].lower()+'.fits'
     bin_spectra_file = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_bin_spectra.hdf5"
 
-    # Load spectra over the effective DUSTMPOLY range
+    # Load spectra over the effective LMIN/LMAX range
     if (config["SFH"]["SPEC_EMICLEAN"] == True) and os.path.isfile(gas_cleaned_file):
         logging.info(f"Using emission-subtracted spectra at {gas_cleaned_file}")
         printStatus.done("Using emission-subtracted spectra")
@@ -1214,10 +1235,10 @@ def extractStarFormationHistories(config):
             bin_err  = f["ESPEC"][idx_lam, :]
             logLam   = logLam[idx_lam]
 
-    # Science-range indices within the DUSTMPOLY-range array
+    # Step 5 range indices within the LMIN/LMAX-range array
     idx_lam_sfh = np.where(np.logical_and(
-        np.exp(logLam) > config["SFH"]["LMIN"],
-        np.exp(logLam) < config["SFH"]["LMAX"]
+        np.exp(logLam) > lmin_step5,
+        np.exp(logLam) < lmax_step5
     ))[0]
     npix_sfh = len(idx_lam_sfh)
 
@@ -1272,7 +1293,7 @@ def extractStarFormationHistories(config):
             elif config["SFH"]["MOM"] == 6:
                 start[i, :] = np.array([0.0, config["KIN"]["SIGMA"], 0.0, 0.0, 0.0, 0.0])
 
-    # Define goodpixels over the DUSTMPOLY range
+    # Define goodpixels over the LMIN/LMAX range
     goodPixels_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam)
 
     # Check if a premask for the first step has been defined
@@ -1287,7 +1308,7 @@ def extractStarFormationHistories(config):
     else:
         goodPixels_dust_sfh = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam)
 
-    # Goodpixels for saving — indexed into the science range only
+    # Goodpixels for saving — indexed into the Step 5 range only
     goodPixels_sfh_cropped = _auxiliary.spectralMasking(config, config["SFH"]["SPEC_MASK"], logLam[idx_lam_sfh])
 
     # Check if plot keyword is set
@@ -1303,7 +1324,7 @@ def extractStarFormationHistories(config):
     else:
         raise KeyError("Either SFH.REGUL or SFH.REGUL_ERR must be set")
 
-    # Define output arrays (sized to the science range, except optimal_template)
+    # Define output arrays (sized to the Step 5 range, except optimal_template)
     ppxf_result   = np.zeros((nbins, 6))
     w_row         = np.zeros((nbins, ncomb))
     ppxf_bestfit  = np.zeros((nbins, npix_sfh))
@@ -1313,7 +1334,7 @@ def extractStarFormationHistories(config):
     red_chi2      = np.zeros(nbins)
     EBV           = np.zeros(nbins)
     mpoly         = np.zeros((nbins, npix_sfh))
-    # optimal_template is on the template pixel grid (DUSTMPOLY range)
+    # optimal_template is on the template pixel grid (LMIN/LMAX range)
     optimal_template = np.zeros((nbins, templates.shape[0]))
 
     # Define output arrays of MC realizations
