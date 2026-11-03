@@ -78,6 +78,9 @@ def age_metal_alpha(passedFiles):
     nAlpha = len(Alpha)
     ncomb = nAges * nMetal * nAlpha
 
+    # Mapping from alpha float value to sMILES filename token
+    _smiles_alpha_map = {-0.2: 'aFem02', 0.0: 'aFep00', 0.2: 'aFep02', 0.4: 'aFep04', 0.6: 'aFep06'}
+
     metal_str = []
     alpha_str = []
     for i in range(len(Metal)):
@@ -86,17 +89,18 @@ def age_metal_alpha(passedFiles):
         elif Metal[i] < 0:
             mm = "m" + "{:.2f}".format(np.abs(Metal[i])) + "T"
         metal_str.append(mm)
-    for i in range(len(Alpha)):
-        if EMILES == False:
-            if sMILES == False:
-                alpha_str.append("Ep" + "{:.2f}".format(Alpha[i]))
-            elif sMILES == True:
-                alpha_str = ['aFem02','aFep00','aFep02','aFep04','aFep06']
-            else:
-                raise ValueError("            Undefined alpha string for alpha-enhanced MILES models")
 
-        elif EMILES == True:
-            alpha_str = ["baseFe"]
+    if EMILES == True:
+        alpha_str = ["baseFe"]
+    elif sMILES == True:
+        for a in Alpha:
+            key = round(float(a), 1)
+            if key not in _smiles_alpha_map:
+                raise ValueError(f"            Unrecognised sMILES alpha value: {a}")
+            alpha_str.append(_smiles_alpha_map[key])
+    else:
+        for a in Alpha:
+            alpha_str.append("Ep" + "{:.2f}".format(a))
 
     return (
         np.log10(Age),
